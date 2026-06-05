@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "easy-mihomo">
 <!ENTITY author    "bigv">
-<!ENTITY version   "1.2.0">
+<!ENTITY version   "1.2.1">
 <!ENTITY launch    "Settings/EasyMihomo.Main">
 <!ENTITY sourceDir "/boot/config/plugins/easy-mihomo">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/wlaosj/easy-mihomo/refs/heads/main/mihomo.plg">
@@ -14,6 +14,10 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" min="6.12.0" support="https://t.me/+7jcTMePlNVwwZjg1" icon="icon-network">
 
 <CHANGES>
+1.2.1  修复与优化
+- 修复：仪表板 CSS 作用域隔离，避免影响其他组件宽度
+- 修复：语言切换按钮默认状态文字不可见
+
 1.2.0  UI 重构与双语支持
 - UI 全面重构：深色主题改为 Unraid 暖橙浅色风格
 - 双语支持：中文/英文切换，默认中文
@@ -1151,7 +1155,7 @@ pre {
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
-.lang-toggle {
+.header-links .lang-toggle {
   display: inline-flex;
   align-items: center;
   padding: 3px 8px;
@@ -1159,11 +1163,12 @@ pre {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
+  background: transparent;
   border: 1px solid var(--accent);
   text-decoration: none;
   transition: all 0.2s;
 }
-.lang-toggle:hover {
+.header-links .lang-toggle:hover {
   background: var(--accent);
   color: white;
   text-decoration: none;
@@ -3147,8 +3152,8 @@ EOT;
     font-weight: bold;
 }
 
-/* 确保4列等宽对齐 */
-.w25 {
+/* 确保4列等宽对齐（限定在 mihomo 组件内，避免影响其他仪表板组件） */
+#tblMihomoDash .w25 {
     flex: 1 1 0;
     min-width: 0;
     text-align: center;
@@ -3159,7 +3164,8 @@ EOT;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-tr.header td, tr.updated td {
+#tblMihomoDash tr.header td,
+#tblMihomoDash tr.updated td {
     display: flex;
 }
 
