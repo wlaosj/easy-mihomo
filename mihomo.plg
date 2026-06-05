@@ -1,0 +1,3449 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "easy-mihomo">
+<!ENTITY author    "bigv">
+<!ENTITY version   "1.2.0">
+<!ENTITY launch    "Settings/EasyMihomo.Main">
+<!ENTITY sourceDir "/boot/config/plugins/easy-mihomo">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/wlaosj/easy-mihomo/refs/heads/main/mihomo.plg">
+<!ENTITY plgPATH   "/boot/config/plugins/&name;">
+<!ENTITY plgNAME   "&name;-&version;-x86_64">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" min="6.12.0" support="https://t.me/+7jcTMePlNVwwZjg1" icon="icon-network">
+
+<CHANGES>
+1.2.0  UI 重构与双语支持
+- UI 全面重构：深色主题改为 Unraid 暖橙浅色风格
+- 双语支持：中文/英文切换，默认中文
+- 卡片式布局：核心引擎、控制面板、配置管理、日志、启动设置分区展示
+- 仪表板按钮布局优化：flexbox 等分，解决换行问题
+- 代码重构：提取公共函数库 common.php，消除重复代码
+- 源码拆分：单文件拆分为多文件结构，配套 build.sh 构建脚本
+- 移除 emoji，界面更专业简洁
+
+1.1.0  完整功能版
+- ⭐ 核心与UI自动检测更新，一键升级
+- ⭐ 支持3种CPU架构：标准版/兼容版/v3优化版
+- ⭐ 智能下载管理：自动重试、进度显示、错误提示
+- 核心显示实际安装的版本类型（如 1.19.15 [v3优化版]）
+- 支持服务运行时下载核心（重启后生效）
+- 日志自动清理：每6小时检查，超过2MB保留最近1000行
+- 界面布局优化：操作更流畅，信息更清晰
+
+1.0.3  配置管理优化版
+- 优化：简化配置覆写逻辑，只覆写UI相关配置项（external-ui-url/name、external-ui）
+- 优化：端口和密码信息从配置文件动态读取，支持用户自定义配置
+- 优化：页面显示信息与实际配置完全一致，提升用户体验
+- 优化：仪表板和控制台链接使用动态端口，支持自定义端口配置
+- 优化：减少不必要的配置干预，给用户更多配置灵活性
+- 修复：确保配置修改后页面显示立即反映变化
+
+1.0.2  功能与体验更新
+- 修复：配置编辑器保存不生效（提前初始化已选配置并在保存时防御性回读）
+- 优化：启动时统一标准化关键配置项（external-ui-url/name、external-ui、external-controller、secret），自动覆写或追加以提升兼容性
+- 清理：移除重复 external-ui 覆写，合并为一次备份+统一 upsert
+- 体验：在"打开控制台"后新增主机/端口/密码行内提示（主机自动取当前内网IP，端口9090，密码yyds666）
+- 新增：仪表板显示模块（自动5秒刷新状态/版本/配置/内存/运行时间，含快捷操作）
+
+1.0.1  日志管理增强版
+- 新增自动日志清理功能
+- 支持定期清理（每天凌晨2点）
+- 智能保留最近1000行日志
+- 添加日志状态监控显示
+- 新增手动智能清理按钮
+- 优化日志文件大小管理
+- 改进配置选择体验，支持自动保存
+- 新增弹出式配置编辑器，提供更大编辑空间
+- 优化界面布局，操作按钮更合理
+- 改进下载进度显示，支持自动消失提示
+- 更新核心版本到 v1.19.15
+
+1.0.0  初始版本发布
+- 支持基本的代理功能
+- 集成 Web 管理界面
+- 支持开机自启动
+- 支持多配置文件管理
+- 支持在线编辑配置
+</CHANGES>
+
+
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+rm -rf /usr/local/emhttp/plugins/easy-mihomo
+mkdir -p /usr/local/emhttp/plugins/easy-mihomo/scripts
+mkdir -p /usr/local/emhttp/plugins/easy-mihomo/include
+mkdir -p /boot/config/plugins/easy-mihomo
+</INLINE>
+</FILE>
+
+<!-- copy files from source directory -->
+<FILE Run="/bin/bash">
+<INLINE><![CDATA[
+set -e
+# 从源目录复制所有文件
+echo "正在创建目录结构..."
+
+# 停止正在运行的mihomo服务
+echo "正在停止mihomo服务..."
+if pgrep -x mihomo >/dev/null 2>&1; then
+  pkill -x mihomo 2>/dev/null || true
+  sleep 2
+  echo "  ✓ mihomo服务已停止"
+else
+  echo "  ✓ mihomo服务未运行"
+fi
+
+# 从GitHub下载并安装文件
+echo "跳过自动下载核心与UI：将由插件页面提供手动下载/更新入口"
+
+# 创建定期日志清理脚本
+echo "  - 正在创建日志清理脚本..."
+cat > "/usr/local/emhttp/plugins/easy-mihomo/scripts/log_cleanup.sh" << 'LOGCLEANEOF'
+#!/bin/bash
+# Mihomo 日志定期清理脚本
+LOG_FILE="/var/log/mihomo.log"
+MAX_SIZE="2MB"  # 最大日志大小
+KEEP_LINES=1000  # 保留行数
+
+# 检查日志文件是否存在
+if [ ! -f "$LOG_FILE" ]; then
+    exit 0
+fi
+
+# 获取文件大小（字节）
+FILE_SIZE=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+
+# 解析最大大小
+case "$MAX_SIZE" in
+    *MB) MAX_BYTES=$((${MAX_SIZE%MB} * 1024 * 1024)) ;;
+    *KB) MAX_BYTES=$((${MAX_SIZE%KB} * 1024)) ;;
+    *) MAX_BYTES=10485760 ;; # 默认10MB
+esac
+
+# 如果文件超过大小限制，进行清理
+if [ "$FILE_SIZE" -gt "$MAX_BYTES" ]; then
+    echo "[$(date)] 日志文件过大 (${FILE_SIZE} bytes)，开始清理..." >> "$LOG_FILE"
+    # 保留最后KEEP_LINES行
+    tail -n "$KEEP_LINES" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    echo "[$(date)] 日志清理完成，保留最近 $KEEP_LINES 行" >> "$LOG_FILE"
+fi
+LOGCLEANEOF
+
+chmod +x "/usr/local/emhttp/plugins/easy-mihomo/scripts/log_cleanup.sh"
+echo "  ✓ 日志清理脚本已创建"
+
+# 创建仪表板JavaScript文件
+echo "  - 正在创建仪表板JavaScript文件..."
+cat > "/usr/local/emhttp/plugins/easy-mihomo/scripts/mihomo-dashboard.js" << 'DASHEOF'
+/*
+  MIT License
+
+  Copyright (c) 2024 Easy-Mihomo
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+*/
+
+/**
+ * Mihomo Dashboard JavaScript Functions
+ * 提供仪表板实时数据更新功能
+ */
+
+// 全局变量
+let mihomoDashboardInterval = null;
+let mihomoLastUpdate = 0;
+
+/**
+ * 刷新mihomo仪表板数据
+ */
+function refreshMihomoDashboard() {
+    const now = Date.now();
+    
+    // 防止过于频繁的请求（最小间隔1秒）
+    if (now - mihomoLastUpdate < 1000) {
+        return;
+    }
+    
+    mihomoLastUpdate = now;
+    
+    $.getJSON('/plugins/easy-mihomo/api.php?cmd=dashboard_status')
+        .done(function(data) {
+            updateMihomoDashboard(data);
+        })
+        .fail(function(xhr, status, error) {
+            console.error('Failed to fetch mihomo dashboard data:', error);
+            showMihomoError();
+        });
+}
+
+/**
+ * 更新仪表板显示
+ * @param {Object} data - 从API获取的数据
+ */
+function updateMihomoDashboard(data) {
+    if (!data) {
+        showMihomoError();
+        return;
+    }
+    
+    // 更新状态显示
+    updateMihomoStatus(data);
+    
+    // 更新版本信息
+    updateMihomoVersion(data);
+    
+    // 更新服务状态
+    updateMihomoService(data);
+    
+    // 更新配置信息
+    updateMihomoConfig(data);
+    
+    // 更新内存使用信息
+    updateMihomoMemory(data);
+    
+    // 更新运行时间信息
+    updateMihomoUptime(data);
+}
+
+/**
+ * 更新mihomo运行状态
+ * @param {Object} data - 数据对象
+ */
+function updateMihomoStatus(data) {
+    const statusIcon = $('.mihomo-status-icon');
+    const statusText = $('.mihomo-status-text');
+    
+    // 移除所有状态类
+    statusIcon.removeClass('running stopped loading');
+    
+    if (data.running) {
+        statusIcon.addClass('running');
+        statusText.text(_('运行中'));
+    } else {
+        statusIcon.addClass('stopped');
+        statusText.text(_('已停止'));
+    }
+}
+
+/**
+ * 更新版本信息
+ * @param {Object} data - 数据对象
+ */
+function updateMihomoVersion(data) {
+    const versionText = $('#mihomo-version');
+    const version = data.version || _('未知');
+    versionText.text(_('版本: ') + version);
+}
+
+/**
+ * 更新服务状态
+ * @param {Object} data - 数据对象
+ */
+function updateMihomoService(data) {
+    const serviceStatus = $('.mihomo-service-status');
+    
+    if (data.running) {
+        serviceStatus.html('<span style="color:#28a745;font-weight:bold;">' + _('运行中') + '</span>');
+    } else {
+        serviceStatus.html('<span style="color:#dc3545;font-weight:bold;">' + _('已停止') + '</span>');
+    }
+}
+
+/**
+ * 更新配置信息
+ * @param {Object} data - 数据对象
+ */
+function updateMihomoConfig(data) {
+    const configInfo = $('.mihomo-config-info');
+    
+    if (data.config && data.config.has_config) {
+        const configName = data.config.selected_config || _('未知');
+        configInfo.html('<span style="color:#28a745;">' + configName + '</span>');
+    } else {
+        configInfo.html('<span style="color:#dc3545;">' + _('未选择配置') + '</span>');
+    }
+}
+
+/**
+ * 更新内存使用信息
+ * @param {Object} data - 数据对象
+ */
+function updateMihomoMemory(data) {
+    const memoryInfo = $('.mihomo-memory-info');
+    
+    if (data.running && data.memory) {
+        memoryInfo.html('<span style="color:#17a2b8;">' + data.memory + '</span>');
+    } else {
+        memoryInfo.html('<span style="color:#6c757d;">' + _('未知') + '</span>');
+    }
+}
+
+/**
+ * 更新运行时间信息
+ * @param {Object} data - 数据对象
+ */
+function updateMihomoUptime(data) {
+    const uptimeInfo = $('.mihomo-uptime-info');
+    
+    if (data.running && data.uptime) {
+        uptimeInfo.html('<span style="color:#28a745;">' + data.uptime + '</span>');
+    } else {
+        uptimeInfo.html('<span style="color:#6c757d;">' + _('未知') + '</span>');
+    }
+}
+
+/**
+ * 显示错误状态
+ */
+function showMihomoError() {
+    $('.mihomo-status-icon').removeClass('running stopped').addClass('loading');
+    $('.mihomo-status-text').text(_('状态: 错误'));
+    $('.mihomo-service-status').text(_('错误'));
+    $('.mihomo-config-info').text(_('错误'));
+    $('.mihomo-memory-info').text(_('错误'));
+    $('.mihomo-uptime-info').text(_('错误'));
+}
+
+/**
+ * 启动自动刷新
+ * @param {number} interval - 刷新间隔（毫秒）
+ */
+function startMihomoDashboardRefresh(interval = 5000) {
+    // 清除现有定时器
+    if (mihomoDashboardInterval) {
+        clearInterval(mihomoDashboardInterval);
+    }
+    
+    // 立即执行一次
+    refreshMihomoDashboard();
+    
+    // 设置定时刷新
+    mihomoDashboardInterval = setInterval(refreshMihomoDashboard, interval);
+}
+
+/**
+ * 停止自动刷新
+ */
+function stopMihomoDashboardRefresh() {
+    if (mihomoDashboardInterval) {
+        clearInterval(mihomoDashboardInterval);
+        mihomoDashboardInterval = null;
+    }
+}
+
+/**
+ * 手动刷新仪表板
+ */
+function manualRefreshMihomoDashboard() {
+    refreshMihomoDashboard();
+}
+
+// 页面加载完成后自动启动
+$(document).ready(function() {
+    // 检查是否在仪表板页面
+    if ($('#tblMihomoDash').length > 0) {
+        startMihomoDashboardRefresh(5000);
+    }
+});
+
+// 页面卸载时清理定时器
+$(window).on('beforeunload', function() {
+    stopMihomoDashboardRefresh();
+});
+DASHEOF
+
+chmod +x "/usr/local/emhttp/plugins/easy-mihomo/scripts/mihomo-dashboard.js"
+echo "  ✓ 仪表板JavaScript文件已创建"
+
+# 添加定时任务（每天凌晨2点清理）
+echo "  - 正在设置定时清理任务..."
+# 移除旧的定时任务
+crontab -l 2>/dev/null | grep -v "mihomo.*log_cleanup" | crontab - 2>/dev/null || true
+# 添加新的定时任务（每6小时检查一次）
+(crontab -l 2>/dev/null; echo "0 */6 * * * /usr/local/emhttp/plugins/easy-mihomo/scripts/log_cleanup.sh >/dev/null 2>&1") | crontab - 2>/dev/null || true
+echo "  ✓ 定时清理任务已设置（每6小时检查一次）"
+
+# 安装阶段完成（核心/UI 下载改为页面手动触发）
+echo "✓ 插件基础文件部署完成（未自动下载核心与UI）"
+]]></INLINE>
+</FILE>
+
+<!-- Common PHP include -->
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/include/common.php">
+<INLINE><![CDATA[
+<?php
+/**
+ * Easy-Mihomo 公共函数库
+ * 被 index.php 和 api.php 共同引用
+ */
+
+// ===== 语言系统 =====
+define('LANG_STRINGS', [
+  // Header
+  'telegram'        => ['cn' => '电报群',     'en' => 'Telegram'],
+  'github'          => ['cn' => 'GitHub',     'en' => 'GitHub'],
+  'by'              => ['cn' => 'by bigv',    'en' => 'by bigv'],
+  'lang_toggle'     => ['cn' => 'EN',         'en' => '中文'],
+
+  // Status
+  'running'         => ['cn' => '运行中',     'en' => 'Running'],
+  'stopped'         => ['cn' => '已停止',     'en' => 'Stopped'],
+  'pid'             => ['cn' => '进程ID',     'en' => 'PID'],
+
+  // Cards
+  'core_engine'     => ['cn' => '核心引擎',   'en' => 'Core Engine'],
+  'dashboard_ui'    => ['cn' => '控制面板',   'en' => 'Dashboard UI'],
+  'configuration'   => ['cn' => '配置管理',   'en' => 'Configuration'],
+  'logs'            => ['cn' => '日志管理',   'en' => 'Logs'],
+  'startup'         => ['cn' => '启动设置',   'en' => 'Startup'],
+
+  // Badges
+  'installed'       => ['cn' => '已安装',     'en' => 'Installed'],
+  'not_installed'   => ['cn' => '未安装',     'en' => 'Not Installed'],
+  'enabled'         => ['cn' => '已启用',     'en' => 'Enabled'],
+  'disabled'        => ['cn' => '未启用',     'en' => 'Disabled'],
+
+  // Labels
+  'version'         => ['cn' => '版本',       'en' => 'Version'],
+  'variant'         => ['cn' => '类型',       'en' => 'Variant'],
+  'host'            => ['cn' => '主机',       'en' => 'Host'],
+  'port'            => ['cn' => '端口',       'en' => 'Port'],
+  'secret'          => ['cn' => '密码',       'en' => 'Secret'],
+  'profile'         => ['cn' => '当前配置',   'en' => 'Profile'],
+  'path'            => ['cn' => '路径',       'en' => 'Path'],
+  'size'            => ['cn' => '大小',       'en' => 'Size'],
+  'lines'           => ['cn' => '行数',       'en' => 'Lines'],
+  'cleanup'         => ['cn' => '清理策略',   'en' => 'Cleanup'],
+
+  // Variant names
+  'standard'        => ['cn' => '标准版',     'en' => 'Standard'],
+  'compatible'      => ['cn' => '兼容版',     'en' => 'Compatible'],
+  'v3_optimized'    => ['cn' => 'v3优化版',   'en' => 'v3 Optimized'],
+
+  // Variant options
+  'standard_desc'   => ['cn' => '标准版 (x86-64-v2)',     'en' => 'Standard (x86-64-v2)'],
+  'compatible_desc' => ['cn' => '兼容版 (老旧CPU)',       'en' => 'Compatible (Legacy CPU)'],
+  'v3_desc'         => ['cn' => 'v3优化版 (Haswell+)',    'en' => 'v3 Optimized (Haswell+)'],
+
+  // Buttons
+  'reinstall'       => ['cn' => '重新安装',   'en' => 'Reinstall'],
+  'check_update'    => ['cn' => '检查更新',   'en' => 'Check Update'],
+  'download'        => ['cn' => '下载',       'en' => 'Download'],
+  'check_latest'    => ['cn' => '检查最新版本', 'en' => 'Check Latest'],
+  'edit'            => ['cn' => '编辑',       'en' => 'Edit'],
+  'refresh'         => ['cn' => '刷新',       'en' => 'Refresh'],
+  'open_folder'     => ['cn' => '打开文件夹', 'en' => 'Open Folder'],
+  'view_logs'       => ['cn' => '查看日志',   'en' => 'View Logs'],
+  'open_console'    => ['cn' => '打开控制台', 'en' => 'Open Console'],
+  'start'           => ['cn' => '启动',       'en' => 'Start'],
+  'stop'            => ['cn' => '停止',       'en' => 'Stop'],
+  'restart'         => ['cn' => '重启',       'en' => 'Restart'],
+  'clear_logs'      => ['cn' => '清空日志',   'en' => 'Clear Logs'],
+  'select_first'    => ['cn' => '请先选择',   'en' => 'Select first'],
+
+  // Select
+  'select_config'   => ['cn' => '请选择配置文件', 'en' => 'Select configuration'],
+
+  // Tips
+  'tip_manual_core' => ['cn' => '手动安装：从 GitHub Releases 下载，放到', 'en' => 'Manual: download from GitHub Releases, place at'],
+  'tip_manual_ui'   => ['cn' => '下载 zashboard dist.zip，重命名为 zashboard.zip 放到插件目录', 'en' => 'Download zashboard dist.zip, rename to zashboard.zip and place in plugin directory'],
+  'tip_no_config'   => ['cn' => '没有配置文件？加入电报群获取模板', 'en' => 'No config? Join Telegram for templates'],
+  'cleanup_value'   => ['cn' => '每6小时 + 启动时', 'en' => 'Every 6h + on startup'],
+  'auto_start'      => ['cn' => '开机自动启动', 'en' => 'Auto-start on boot'],
+
+  // Install status
+  'err_no_core'     => ['cn' => '核心未安装，点击下方"下载"按钮', 'en' => 'Core not installed. Click "Download" below.'],
+  'warn_no_ui'      => ['cn' => 'UI 未安装，点击下方"下载"按钮', 'en' => 'UI not found. Click "Download" below.'],
+  'info_no_config'  => ['cn' => '未发现配置文件，上传到插件目录或使用"打开文件夹"', 'en' => 'No config files. Upload to plugin directory or use "Open Folder".'],
+
+  // Modals
+  'edit_config'     => ['cn' => '编辑配置',   'en' => 'Edit Configuration'],
+  'save_restart'    => ['cn' => '保存后重启服务', 'en' => 'Restart service after save'],
+  'cancel'          => ['cn' => '取消',       'en' => 'Cancel'],
+  'save'            => ['cn' => '保存配置',   'en' => 'Save'],
+  'save_tip'        => ['cn' => '保存将直接覆盖所选配置（上限 1MB）。', 'en' => 'Save will overwrite the selected config (max 1MB).'],
+  'no_config_tip'   => ['cn' => '尚未选择配置文件。', 'en' => 'No config file selected.'],
+  'log_viewer'      => ['cn' => '日志查看器', 'en' => 'Log Viewer'],
+  'log_auto_clean'  => ['cn' => '自动清理：每6小时 + 启动时 | 超过2MB保留最近1000行', 'en' => 'Auto cleanup: every 6h + startup | keep last 1000 lines when >2MB'],
+  'close'           => ['cn' => '关闭',       'en' => 'Close'],
+  'refresh_log'     => ['cn' => '刷新日志',   'en' => 'Refresh'],
+  'clear_log'       => ['cn' => '清空日志',   'en' => 'Clear'],
+]);
+
+/**
+ * 获取当前语言
+ * @return string 'cn' 或 'en'
+ */
+function getLang() {
+  // 1. GET 参数
+  if (isset($_GET['lang']) && in_array($_GET['lang'], ['cn', 'en'])) {
+    setcookie('mihomo_lang', $_GET['lang'], time() + 86400 * 365, '/');
+    return $_GET['lang'];
+  }
+  // 2. Cookie
+  if (isset($_COOKIE['mihomo_lang']) && in_array($_COOKIE['mihomo_lang'], ['cn', 'en'])) {
+    return $_COOKIE['mihomo_lang'];
+  }
+  // 3. 默认中文
+  return 'cn';
+}
+
+/**
+ * 获取翻译文本
+ * @param string $key 键名
+ * @return string 翻译后的文本
+ */
+function t($key) {
+  $lang = getLang();
+  if (defined('LANG_STRINGS') && isset(LANG_STRINGS[$key])) {
+    return LANG_STRINGS[$key][$lang] ?? LANG_STRINGS[$key]['cn'] ?? $key;
+  }
+  return $key;
+}
+
+/**
+ * 格式化字节数为可读字符串
+ * @param int $size 字节数
+ * @param int $precision 小数精度
+ * @return string 格式化后的字符串
+ */
+function formatBytes($size, $precision = 2) {
+    $units = array('B', 'KB', 'MB', 'GB', 'TB');
+    for ($i = 0; $size > 1024 && $i < count($units) - 1; $i++) {
+        $size /= 1024;
+    }
+    return round($size, $precision) . ' ' . $units[$i];
+}
+
+/**
+ * 从 Mihomo 配置文件中解析端口和密码信息
+ * @param string $configPath 配置文件路径
+ * @return array ['controller' => ..., 'secret' => ..., 'port' => ...]
+ */
+function getMihomoConfigValues($configPath) {
+    if (!file_exists($configPath)) {
+        return ['controller' => null, 'secret' => null, 'port' => null];
+    }
+
+    $content = file_get_contents($configPath);
+    $controller = null;
+    $secret = null;
+    $port = null;
+
+    // 解析 external-controller
+    if (preg_match('/external-controller:\s*(.+)/', $content, $matches)) {
+        $controller = trim($matches[1]);
+        // 从 controller 中提取端口
+        if (strpos($controller, ':') !== false) {
+            $port = explode(':', $controller)[1] ?? null;
+        }
+    }
+
+    // 解析 secret
+    if (preg_match('/secret:\s*(.+)/', $content, $matches)) {
+        $secret = trim($matches[1]);
+    }
+
+    return ['controller' => $controller, 'secret' => $secret, 'port' => $port];
+}
+]]></INLINE>
+</FILE>
+
+<!-- WebUI index -->
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/index.php">
+<INLINE><![CDATA[
+<?php
+require_once __DIR__ . '/include/common.php';
+
+$baseRun = '/usr/local/emhttp/plugins/easy-mihomo';
+$scripts = $baseRun . '/scripts';
+$logFile = '/var/log/mihomo.log';
+$confDir = '/boot/config/plugins/easy-mihomo';
+$selectFile = $confDir . '/selected.conf';
+$variantFile = $confDir . '/variant.conf';
+
+// 提前读取当前选择的配置，供后续命令处理（如 saveconf）使用
+$selectedName = is_file($selectFile) ? trim(@file_get_contents($selectFile)) : '';
+$selectedPath = ($selectedName && is_file($confDir . '/' . $selectedName)) ? ($confDir . '/' . $selectedName) : '';
+
+// 读取当前选择的版本类型（默认 standard）
+$currentVariant = is_file($variantFile) ? trim(@file_get_contents($variantFile)) : 'standard';
+if (!in_array($currentVariant, ['standard', 'compatible', 'v3'])) {
+  $currentVariant = 'standard';
+}
+
+// 进度文件目录
+$progressDir = '/var/tmp/easy-mihomo-progress';
+@mkdir($progressDir, 0777, true);
+
+$cmd = isset($_POST['cmd']) ? $_POST['cmd'] : (isset($_GET['cmd']) ? $_GET['cmd'] : '');
+$msg = '';
+
+// 先处理命令，再读取配置状态
+
+// 早期拦截：进度轮询，直接输出文本并退出
+if ($cmd === 'get_progress') {
+  $target = $_GET['target'] ?? $_POST['target'] ?? '';
+  $file = '';
+  if ($target === 'core') $file = $progressDir . '/core.status';
+  if ($target === 'ui')   $file = $progressDir . '/ui.status';
+  header('Content-Type: text/plain; charset=utf-8');
+  if ($file && is_file($file)) {
+    echo @file_get_contents($file);
+  }
+  exit;
+}
+if ($cmd === 'start') {
+  $out = shell_exec("bash $scripts/start.sh 2>&1");
+  $msg = htmlspecialchars($out ?? '');
+}
+if ($cmd === 'stop') {
+  $out = shell_exec("bash $scripts/stop.sh 2>&1");
+  $msg = htmlspecialchars($out ?? '');
+}
+if ($cmd === 'restart') {
+  $out = shell_exec("bash $scripts/restart.sh 2>&1");
+  $msg = htmlspecialchars($out ?? '');
+}
+if ($cmd === 'clearlog') {
+  @file_put_contents($logFile, "");
+  $msg = 'Logs cleared';
+}
+if ($cmd === 'cleanup_log') {
+  $out = shell_exec("bash $scripts/log_cleanup.sh 2>&1");
+  $msg = 'Log cleanup done: ' . htmlspecialchars($out ?? '');
+}
+if ($cmd === 'start_download') {
+  $target = $_GET['target'] ?? $_POST['target'] ?? '';
+  if ($target === 'core') {
+    @unlink($progressDir . '/core.status');
+    $out = shell_exec("nohup bash $scripts/download_core.sh --progress >$progressDir/core.log 2>&1 & echo $!");
+    $msg = 'Core download started PID: ' . htmlspecialchars(trim($out));
+  } elseif ($target === 'ui') {
+    @unlink($progressDir . '/ui.status');
+    $out = shell_exec("nohup bash $scripts/download_ui.sh --progress >$progressDir/ui.log 2>&1 & echo $!");
+    $msg = 'UI download started PID: ' . htmlspecialchars(trim($out));
+  } else {
+    $msg = 'Unknown download target';
+  }
+  // 若为异步请求（ajax=1），仅返回纯文本并退出，避免整页HTML回填到消息区域
+  if ((isset($_GET['ajax']) && $_GET['ajax'] === '1') || (isset($_POST['ajax']) && $_POST['ajax'] === '1')) {
+    header('Content-Type: text/plain; charset=utf-8');
+    echo $msg;
+    exit;
+  }
+}
+if ($cmd === 'select_conf') {
+  $name = basename($_POST['name'] ?? '');
+  if ($name === '' || !preg_match('/\.(ya?ml)$/i', $name)) {
+    $msg = 'Invalid selection';
+  } else {
+    $path = $confDir . '/' . $name;
+    if (is_file($path)) {
+      if (@file_put_contents($selectFile, $name) !== false) {
+        $msg = 'Selected: ' . htmlspecialchars($name);
+      } else {
+        $msg = 'Failed to save selection';
+      }
+    } else {
+      $msg = 'File not found';
+    }
+  }
+}
+if ($cmd === 'set_variant') {
+  $variant = $_POST['variant'] ?? '';
+  if (!in_array($variant, ['standard', 'compatible', 'v3'])) {
+    $msg = 'Invalid variant';
+  } else {
+    if (@file_put_contents($variantFile, $variant) !== false) {
+      $variantNames = [
+        'standard' => t('standard_desc'),
+        'compatible' => t('compatible_desc'),
+        'v3' => t('v3_desc')
+      ];
+      $msg = 'Selected: ' . htmlspecialchars($variantNames[$variant]);
+      $currentVariant = $variant; // 立即更新当前值
+    } else {
+      $msg = 'Save failed';
+    }
+  }
+}
+// 上传功能已移除，请手动上传配置文件到插件目录
+$maxSize = 1024*1024; // 1MB
+if ($cmd === 'saveconf') {
+  $content = $_POST['content'] ?? '';
+  if ($content === '') {
+    $msg = 'Content is empty';
+  } else if (strlen($content) > $maxSize) {
+    $msg = 'Content too large (>1MB)';
+  } else {
+    // 防御性：若下方未读取到，命令阶段再次解析一次
+    if (!$selectedPath) {
+      $selectedNameCmd = is_file($selectFile) ? trim(@file_get_contents($selectFile)) : '';
+      $selectedPath = ($selectedNameCmd && is_file($confDir . '/' . $selectedNameCmd)) ? ($confDir . '/' . $selectedNameCmd) : '';
+    }
+    if (!$selectedPath) {
+      $msg = 'No config selected';
+    } else {
+      if (!is_dir(dirname($selectedPath))) @mkdir(dirname($selectedPath), 0777, true);
+      if (@file_put_contents($selectedPath, $content) !== false) {
+        $msg = 'Saved: ' . htmlspecialchars($selectedPath);
+        $shouldRestart = isset($_POST['restart']) && $_POST['restart'] === '1';
+        if ($shouldRestart) {
+          $out = shell_exec("bash $scripts/restart.sh 2>&1");
+          $msg .= ', service restarted';
+          if (!empty($out)) $msg .= ': ' . htmlspecialchars($out);
+        }
+      } else {
+        $msg = 'Save failed';
+      }
+    }
+  }
+}
+$status = shell_exec("bash $scripts/status.sh 2>&1");
+$version = shell_exec("bash $scripts/version.sh 2>&1");
+$uiVersion = shell_exec("bash $scripts/ui_version.sh 2>&1");
+$logTail = file_exists($logFile) ? trim(shell_exec("tail -n 200 $logFile 2>&1")) : '';
+
+// 读取实际安装的版本类型（从 .version 文件）
+$installedVariant = 'standard'; // 默认值
+$versionFile = '/boot/config/plugins/easy-mihomo/.version';
+if (file_exists($versionFile)) {
+  $versionContent = trim(@file_get_contents($versionFile));
+  if (strpos($versionContent, '|') !== false) {
+    // 新格式：版本号|版本类型
+    $parts = explode('|', $versionContent, 2);
+    if (count($parts) === 2) {
+      $installedVariant = $parts[1];
+    }
+  }
+  // 验证有效性
+  if (!in_array($installedVariant, ['standard', 'compatible', 'v3'])) {
+    $installedVariant = 'standard';
+  }
+}
+
+// 获取日志文件信息
+$logSize = file_exists($logFile) ? filesize($logFile) : 0;
+$logSizeFormatted = formatBytes($logSize);
+$logLines = file_exists($logFile) ? count(file($logFile)) : 0;
+
+// 处理上传重定向返回的消息
+if (isset($_GET['uploadmsg']) && $_GET['uploadmsg'] !== '') {
+  $msg = $_GET['uploadmsg'];
+}
+// 仅在输出 HTML 前设置内容类型，避免影响上传重定向
+header('Content-Type: text/html; charset=utf-8');
+
+$available = array_values(array_filter(scandir($confDir) ?: [], function($f) use ($confDir){
+  return is_file($confDir . '/' . $f) && preg_match('/\.(ya?ml)$/i', $f);
+}));
+
+// 开机即启动（不依赖阵列）设置
+$bootFlag = '/boot/config/plugins/easy-mihomo/bootstart.enabled';
+if ($cmd === 'set_bootstart') {
+  $enable = ($_POST['enable'] ?? '') === '1';
+  $goPath = '/boot/config/go';
+  $begin = "# BEGIN easy-mihomo (do not edit)";
+  $end   = "# END easy-mihomo";
+  $block = $begin . "\n" .
+    "(\n" .
+    "cat <<'EOF' >/tmp/easy-mihomo-boot.sh\n" .
+    "#!/bin/bash\n" .
+    "FLAG=\"/boot/config/plugins/easy-mihomo/bootstart.enabled\"\n" .
+    "START_SH=\"/usr/local/emhttp/plugins/easy-mihomo/scripts/start.sh\"\n" .
+    "LOG=\"/var/log/mihomo.log\"\n" .
+    "for i in \$(seq 1 60); do\n" .
+    "  if [ -x \"\$START_SH\" ]; then break; fi\n" .
+    "  sleep 1\n" .
+    "done\n" .
+    "if [ -f \"\$FLAG\" ] && [ -x \"\$START_SH\" ]; then\n" .
+    "  echo \"[easy-mihomo] boot detected, starting service...\" >> \"\$LOG\" 2>&1\n" .
+    "  bash \"\$START_SH\" >> \"\$LOG\" 2>&1 || true\n" .
+    "fi\n" .
+    "rm -f /tmp/easy-mihomo-boot.sh\n" .
+    "EOF\n" .
+    "bash /tmp/easy-mihomo-boot.sh &\n" .
+    ")\n" .
+    $end . "\n";
+
+  if ($enable) {
+    if (!is_dir(dirname($bootFlag))) @mkdir(dirname($bootFlag), 0777, true);
+    @file_put_contents($bootFlag, 'enabled');
+    $go = file_exists($goPath) ? @file_get_contents($goPath) : "";
+    if (strpos($go, $begin) !== false && strpos($go, $end) !== false) {
+      $pattern = sprintf('/%s[\s\S]*?%s\n?/m', preg_quote($begin, '/'), preg_quote($end, '/'));
+      $go = preg_replace($pattern, $block, $go, 1);
+    } else {
+      if ($go !== "" && substr($go, -1) !== "\n") $go .= "\n";
+      $go .= $block;
+    }
+    @file_put_contents($goPath, $go);
+    $msg = 'bootstart enabled (go injected)';
+  } else {
+    @unlink($bootFlag);
+    $go = file_exists($goPath) ? @file_get_contents($goPath) : "";
+    if ($go !== "") {
+      $pattern = sprintf('/%s[\s\S]*?%s\n?/m', preg_quote($begin, '/'), preg_quote($end, '/'));
+      $newGo = preg_replace($pattern, '', $go, 1);
+      if ($newGo !== null) @file_put_contents($goPath, $newGo);
+    }
+    $msg = 'bootstart disabled (go cleaned)';
+  }
+}
+$bootstartOn = file_exists($bootFlag);
+
+// 现在读取已选择的配置（在所有命令处理完成后）
+$selectedName = is_file($selectFile) ? trim(@file_get_contents($selectFile)) : '';
+$selectedPath = ($selectedName && is_file($confDir . '/' . $selectedName)) ? ($confDir . '/' . $selectedName) : '';
+
+// 读取配置内容用于编辑
+$confText = ($selectedPath && file_exists($selectedPath)) ? @file_get_contents($selectedPath) : '';
+
+// 解析配置文件中的端口和密码信息
+$configValues = getMihomoConfigValues($selectedPath);
+$controller = $configValues['controller'];
+$secret = $configValues['secret'];
+$port = $configValues['port'];
+
+// 检查安装状态（优先检测U盘，因为核心保存在U盘，启动时自动加载到内存）
+$installStatus = '';
+$binUdiskExists = file_exists('/boot/config/plugins/easy-mihomo/mihomo');  // U盘核心（真实安装状态）
+$binExists = file_exists('/usr/local/bin/mihomo');  // 内存核心（运行时临时缓存）
+$uiExists = file_exists('/boot/config/plugins/easy-mihomo/zashboard.zip');
+
+// 检查插件目录下是否有任何配置文件
+$confDir = '/boot/config/plugins/easy-mihomo';
+$confExists = false;
+if (is_dir($confDir)) {
+  $files = scandir($confDir);
+  foreach ($files as $file) {
+    if (preg_match('/\.(ya?ml)$/i', $file)) {
+      $confExists = true;
+      break;
+    }
+  }
+}
+
+// 检查核心组件（U盘为准，因为启动时会自动加载到内存）
+if (!$binUdiskExists) {
+  $installStatus = '<div class="error">' . t('err_no_core') . '</div>';
+} elseif (!$uiExists) {
+  $installStatus = '<div class="warning">' . t('warn_no_ui') . '</div>';
+} elseif (!$confExists) {
+  $installStatus = '<div class="success">' . t('info_no_config') . '</div>';
+}
+?>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Easy-Mihomo</title>
+<style>
+:root {
+  --bg: #f5f5f5;
+  --bg-card: #ffffff;
+  --bg-card-hover: #fafafa;
+  --border: #dddddd;
+  --text: #333333;
+  --text-dim: #777777;
+  --text-bright: #333333;
+  --accent: #e67e22;
+  --accent-hover: #d35400;
+  --accent-light: rgba(230,126,34,0.1);
+  --green: #27ae60;
+  --green-light: rgba(39,174,96,0.1);
+  --red: #e74c3c;
+  --red-light: rgba(231,76,60,0.1);
+  --yellow: #f39c12;
+  --yellow-light: rgba(243,156,18,0.1);
+  --blue: #3498db;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  padding: 24px;
+  line-height: 1.5;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+/* 头部 */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.header h1 {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.header h1 .icon { font-size: 28px; }
+.header-links {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.header-links a, .header-links span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: white;
+  text-decoration: none;
+  transition: opacity 0.2s;
+}
+.header-links a:hover { opacity: 0.85; text-decoration: none; }
+.link-tg { background: #0088cc; }
+.link-github { background: #24292e; }
+.link-hot {
+  background: linear-gradient(135deg, #e74c3c, #f39c12);
+  animation: pulse 2s ease-in-out infinite;
+}
+.author-info { color: var(--text-dim); font-size: 12px; padding: 0; background: none; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+/* 状态横幅 */
+.status-banner {
+  background: linear-gradient(135deg, #e74c3c, #f39c12);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  box-shadow: 0 4px 12px rgba(230,126,34,0.25);
+}
+.status-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: white;
+}
+.status-dot.running { box-shadow: 0 0 12px rgba(255,255,255,0.6); }
+.status-dot.stopped { opacity: 0.6; }
+.status-text { font-size: 18px; font-weight: 700; color: white; }
+.status-pid { font-size: 13px; color: rgba(255,255,255,0.8); margin-left: 8px; }
+
+/* 卡片网格 */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow);
+  transition: border-color 0.2s;
+}
+.card:hover { border-color: var(--accent); }
+.card-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-title .badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.badge-green { background: var(--green-light); color: var(--green); }
+.badge-red { background: var(--red-light); color: var(--red); }
+.badge-blue { background: rgba(52,152,219,0.1); color: var(--blue); }
+.badge-gray { background: rgba(119,119,119,0.1); color: var(--text-dim); }
+.badge-orange { background: var(--accent-light); color: var(--accent); }
+
+/* 表单行 */
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.form-label {
+  font-size: 13px;
+  color: var(--text-dim);
+  min-width: 70px;
+  flex-shrink: 0;
+}
+.form-value {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 按钮 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: white;
+}
+.btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+.btn:active { transform: translateY(0); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+.btn-green { background: var(--green); }
+.btn-red { background: var(--red); }
+.btn-accent { background: var(--blue); }
+.btn-yellow { background: var(--yellow); color: #212529; }
+.btn-dark { background: #555555; }
+.btn-accent { background: var(--accent); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+/* 选择框 */
+select {
+  background: white;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+select:hover, select:focus { border-color: var(--accent); outline: none; }
+
+/* 提示框 */
+.tip {
+  background: var(--accent-light);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 10px;
+  line-height: 1.6;
+}
+.tip strong { color: var(--text); }
+.tip a { color: var(--accent-hover); }
+
+/* 提示 */
+.alert { padding: 10px 14px; border-radius: var(--radius-sm); margin-bottom: 16px; font-size: 13px; }
+.alert-warning { background: var(--yellow-light); border: 1px solid rgba(243,156,18,0.3); color: #b87500; }
+.alert-error { background: var(--red-light); border: 1px solid rgba(231,76,60,0.3); color: var(--red); }
+.alert-success { background: var(--green-light); border: 1px solid rgba(39,174,96,0.3); color: var(--green); }
+
+/* 操作栏 */
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+/* 进度文本 */
+.progress-text { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+
+/* 日志/预格式 */
+pre {
+  background: #fafafa;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  max-height: 360px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* 弹窗 */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: rgba(0,0,0,0.4);
+  z-index: 1000;
+  overflow: auto;
+}
+.modal-content {
+  position: relative;
+  margin: 5% auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  width: 90%;
+  max-width: 1200px;
+  min-height: 500px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+}
+.modal-content h3 {
+  color: var(--text);
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-content textarea {
+  width: 100%;
+  height: 450px;
+  background: #fafafa;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+.modal-content textarea:focus { border-color: var(--accent); outline: none; }
+.modal-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.lang-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.lang-toggle:hover {
+  background: var(--accent);
+  color: white;
+  text-decoration: none;
+}
+</style>
+<script>
+function executeAction(action) {
+  // 使用GET参数直接跳转
+  var url = new URL(window.location);
+  url.searchParams.set('cmd', action);
+  window.location.href = url.toString();
+}
+
+function openConsole() {
+  // 获取当前页面的主机名（不包含端口）
+  var currentHostname = window.location.hostname;
+  // 从页面中获取动态端口信息
+  var portSpans = document.querySelectorAll('span');
+  var port = null;
+  for (var i = 0; i < portSpans.length; i++) {
+    if (portSpans[i].textContent === '端口：') {
+      var nextSpan = portSpans[i].nextElementSibling;
+      if (nextSpan && nextSpan.tagName === 'SPAN') {
+        var portText = nextSpan.textContent.trim();
+        // 检查是否包含"未设置"文本（处理嵌套span的情况）
+        if (portText && portText !== '未设置' && !portText.includes('未设置')) {
+          port = portText;
+        }
+        break;
+      }
+    }
+  }
+  
+  // 如果没找到端口，尝试通过更简单的方法获取
+  if (!port) {
+    // 查找包含端口号的span元素
+    var allSpans = document.querySelectorAll('span');
+    for (var j = 0; j < allSpans.length; j++) {
+      var text = allSpans[j].textContent.trim();
+      // 检查是否是纯数字（端口号）
+      if (/^\d+$/.test(text) && parseInt(text) > 0 && parseInt(text) < 65536) {
+        port = text;
+        break;
+      }
+    }
+  }
+  
+  if (!port) {
+    alert('Please set external-controller port in config file');
+    return;
+  }
+  
+  var consoleUrl = 'http://' + currentHostname + ':' + port + '/ui/zashboard/#/proxies';
+  // 在新标签页中打开控制台
+  window.open(consoleUrl, '_blank');
+}
+
+function openFileManager() {
+  // 获取当前页面的主机名和端口
+  var currentHostname = window.location.hostname;
+  var currentPort = window.location.port;
+  // 构建文件管理器URL，直接定位到插件配置目录
+  var fileManagerUrl = 'http://' + currentHostname + ':' + currentPort + '/Main/Browse?dir=%2Fboot%2Fconfig%2Fplugins%2Feasy-mihomo';
+  // 在新标签页中打开文件管理器
+  window.open(fileManagerUrl, '_blank');
+}
+
+// 全局变量存储更新状态
+window.updateCheckData = null;
+
+function checkUpdate(silent) {
+  var updateInfo = document.getElementById('update-info');
+  if (updateInfo && !silent) {
+    updateInfo.innerHTML = '<span style="color:#777777;">检查中...</span>';
+  }
+  
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/plugins/easy-mihomo/api.php?cmd=check_update');
+  xhr.onload = function(){
+    if (xhr.status === 200) {
+      try {
+        var data = JSON.parse(xhr.responseText);
+        // 保存到全局变量
+        window.updateCheckData = data;
+        
+        var localVer = document.getElementById('local-version');
+        
+        if (localVer && data.local && data.local !== 'not installed') {
+          localVer.textContent = data.local;
+        }
+        
+        if (updateInfo) {
+          if (data.has_update) {
+            if (data.local === 'not installed') {
+              updateInfo.innerHTML = '<span style="color:#e74c3c;">' + data.message + '</span>';
+            } else {
+              updateInfo.innerHTML = '<span style="color:#ffc107;">' + data.message + '</span>';
+            }
+          } else {
+            updateInfo.innerHTML = '<span style="color:#27ae60;">' + data.message + '</span>';
+          }
+          
+          // 5秒后自动清除消息（如果是已是最新版本）
+          if (!data.has_update && !silent) {
+            setTimeout(function(){ 
+              if (updateInfo) updateInfo.innerHTML = ''; 
+            }, 5000);
+          }
+        }
+        
+        // 更新下载按钮状态
+        updateDownloadButtonState();
+        
+      } catch (e) {
+        if (updateInfo && !silent) {
+          updateInfo.innerHTML = '<span style="color:#e74c3c;">解析失败</span>';
+        }
+      }
+    } else {
+      if (updateInfo && !silent) {
+        updateInfo.innerHTML = '<span style="color:#e74c3c;">检查失败</span>';
+      }
+    }
+  };
+  xhr.onerror = function(){
+    if (updateInfo && !silent) {
+      updateInfo.innerHTML = '<span style="color:#e74c3c;">网络错误</span>';
+    }
+  };
+  xhr.send();
+}
+
+// 检查 UI 更新
+function checkUIUpdate(silent) {
+  var uiUpdateInfo = document.getElementById('ui-update-info');
+  if (uiUpdateInfo && !silent) {
+    uiUpdateInfo.innerHTML = '<span style="color:#777777;">检查中...</span>';
+  }
+  
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/plugins/easy-mihomo/api.php?cmd=check_ui_update');
+  xhr.onload = function(){
+    if (xhr.status === 200) {
+      try {
+        var data = JSON.parse(xhr.responseText);
+        // 保存到全局变量
+        window.uiUpdateCheckData = data;
+        
+        var localVer = document.getElementById('ui-local-version');
+        
+        if (localVer && data.local && data.local !== 'not installed') {
+          localVer.textContent = data.local;
+        }
+        
+        if (uiUpdateInfo) {
+          if (data.has_update) {
+            if (data.local === 'not installed') {
+              uiUpdateInfo.innerHTML = '<span style="color:#e74c3c;">' + data.message + '</span>';
+            } else {
+              uiUpdateInfo.innerHTML = '<span style="color:#ffc107;">' + data.message + '</span>';
+            }
+          } else {
+            uiUpdateInfo.innerHTML = '<span style="color:#27ae60;">' + data.message + '</span>';
+          }
+          
+          // 5秒后自动清除消息（如果是已是最新版本）
+          if (!data.has_update && !silent) {
+            setTimeout(function(){ 
+              if (uiUpdateInfo) uiUpdateInfo.innerHTML = ''; 
+            }, 5000);
+          }
+        }
+        
+        // 更新 UI 下载按钮状态
+        updateUIDownloadButtonState();
+        
+      } catch (e) {
+        if (uiUpdateInfo && !silent) {
+          uiUpdateInfo.innerHTML = '<span style="color:#e74c3c;">解析失败</span>';
+        }
+      }
+    } else {
+      if (uiUpdateInfo && !silent) {
+        uiUpdateInfo.innerHTML = '<span style="color:#e74c3c;">检查失败</span>';
+      }
+    }
+  };
+  xhr.onerror = function(){
+    if (uiUpdateInfo && !silent) {
+      uiUpdateInfo.innerHTML = '<span style="color:#e74c3c;">网络错误</span>';
+    }
+  };
+  xhr.send();
+}
+
+// 更新 UI 下载按钮状态
+function updateUIDownloadButtonState() {
+  var downloadBtn = document.getElementById('download-ui-btn');
+  if (!downloadBtn) return;
+  
+  // 检查是否正在下载
+  var progressBox = document.getElementById('progress-ui');
+  if (progressBox && progressBox.textContent && progressBox.textContent.includes('%')) {
+    downloadBtn.disabled = true;
+    downloadBtn.style.background = '#777777';
+    downloadBtn.style.cursor = 'not-allowed';
+    downloadBtn.textContent = '下载中...';
+    return;
+  }
+  
+  // 启用按钮
+  downloadBtn.disabled = false;
+  downloadBtn.style.cursor = 'pointer';
+  
+  if (window.uiUpdateCheckData) {
+    var data = window.uiUpdateCheckData;
+    if (data.has_update) {
+      if (data.local === 'not installed') {
+        downloadBtn.style.background = '#27ae60';
+        downloadBtn.textContent = '下载 UI';
+      } else {
+        downloadBtn.style.background = '#f39c12';
+        downloadBtn.style.color = '#000';
+        downloadBtn.textContent = '更新到 ' + data.remote;
+      }
+    } else {
+      downloadBtn.style.background = '#777777';
+      downloadBtn.textContent = '重新安装';
+    }
+  } else {
+    downloadBtn.style.background = '#e67e22';
+    downloadBtn.textContent = '下载/更新 UI';
+  }
+}
+
+// 智能下载 UI 函数
+function smartDownloadUI(target, btn) {
+  // 检查是否正在下载
+  var progressBox = document.getElementById('progress-ui');
+  if (progressBox && progressBox.textContent && progressBox.textContent.includes('%')) {
+    alert('Download in progress, please wait');
+    return;
+  }
+  
+  // 检查是否有更新信息
+  if (!window.uiUpdateCheckData) {
+    // 没有检查过更新，先检查
+    if (confirm('Download latest UI?\n\nContinue?')) {
+      startDownload(target, btn);
+    }
+    return;
+  }
+  
+  var data = window.uiUpdateCheckData;
+  
+  // 根据更新状态给出不同提示
+  if (data.has_update) {
+    // 有新版本
+    var confirmMsg = '';
+    if (data.local === 'not installed') {
+      confirmMsg = 'Download UI\n\nLatest: ' + data.remote + '\n\nContinue?';
+    } else {
+      confirmMsg = 'New version available\n\nCurrent: ' + data.local + '\nLatest: ' + data.remote + '\n\nUpdate?';
+    }
+
+    if (confirm(confirmMsg)) {
+      startDownload(target, btn);
+    }
+  } else {
+    // 已是最新版本，询问是否重新安装
+    var reinstallMsg = 'Already latest: ' + data.remote + '\n\nReinstall?';
+    if (confirm(reinstallMsg)) {
+      startDownload(target, btn);
+    }
+  }
+}
+
+// 检查服务是否运行
+function checkServiceRunning() {
+  var statusElements = document.querySelectorAll('span[style*="color:#27ae60"]');
+  for (var i = 0; i < statusElements.length; i++) {
+    if (statusElements[i].textContent.includes('运行中')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// 更新下载按钮状态
+function updateDownloadButtonState() {
+  var downloadBtn = document.getElementById('download-btn');
+  var updateInfo = document.getElementById('update-info');
+  
+  if (!downloadBtn) return;
+  
+  // 检查是否正在下载
+  var progressBox = document.getElementById('progress-core');
+  if (progressBox && progressBox.textContent && progressBox.textContent.includes('%')) {
+    downloadBtn.disabled = true;
+    downloadBtn.style.background = '#777777';
+    downloadBtn.style.cursor = 'not-allowed';
+    downloadBtn.textContent = '下载中...';
+    return;
+  }
+  
+  // 始终启用按钮（即使服务正在运行也允许下载核心）
+  // 原因：下载核心需要魔法网络（代理），停止服务会导致无法下载
+  // 新核心会保存到U盘并删除内存核心，重启服务后自动从U盘加载
+  downloadBtn.disabled = false;
+  downloadBtn.style.cursor = 'pointer';
+  
+  if (window.updateCheckData) {
+    var data = window.updateCheckData;
+    if (data.has_update) {
+      if (data.local === 'not installed') {
+        downloadBtn.style.background = '#27ae60';
+        downloadBtn.textContent = '下载核心';
+      } else {
+        downloadBtn.style.background = '#f39c12';
+        downloadBtn.style.color = '#000';
+        downloadBtn.textContent = '更新到 ' + data.remote;
+      }
+    } else {
+      downloadBtn.style.background = '#777777';
+      downloadBtn.textContent = '重新安装';
+    }
+  } else {
+    downloadBtn.style.background = '#e67e22';
+    downloadBtn.textContent = '下载/更新核心';
+  }
+}
+
+// 智能下载函数
+function smartDownload(target, btn) {
+  // 检查是否正在下载
+  var progressBox = document.getElementById('progress-core');
+  if (progressBox && progressBox.textContent && progressBox.textContent.includes('%')) {
+    alert('Download in progress, please wait');
+    return;
+  }
+  
+  // 检查服务是否运行（用于提示，不阻止下载）
+  var isServiceRunning = checkServiceRunning();
+  
+  // 检查是否有更新信息
+  if (!window.updateCheckData) {
+    // 没有检查过更新，先检查
+    var msg = 'Download core\n\nContinue?';
+    if (isServiceRunning) {
+      msg = 'Download core\n\nNote: Service is running. Restart required after download.\n\nContinue?';
+    }
+    if (confirm(msg)) {
+      startDownload(target, btn);
+    }
+    return;
+  }
+  
+  var data = window.updateCheckData;
+  
+  // 根据更新状态给出不同提示
+  if (data.has_update) {
+    // 有新版本
+    var confirmMsg = '';
+    if (data.local === 'not installed') {
+      confirmMsg = 'Download core\n\nLatest: ' + data.remote + '\n\nContinue?';
+      if (isServiceRunning) {
+        confirmMsg = 'Download core\n\nLatest: ' + data.remote + '\n\nNote: Service is running. Restart required after download.\n\nContinue?';
+      }
+    } else {
+      confirmMsg = 'New version available\n\nCurrent: ' + data.local + '\nLatest: ' + data.remote + '\n\nUpdate?';
+      if (isServiceRunning) {
+        confirmMsg = 'New version available\n\nCurrent: ' + data.local + '\nLatest: ' + data.remote + '\n\nNote: Service is running. Restart required after download.\n\nUpdate?';
+      }
+    }
+    
+    if (confirm(confirmMsg)) {
+      startDownload(target, btn);
+    }
+  } else {
+    // 已是最新版本，询问是否重新安装
+    var reinstallMsg = 'Already latest: ' + data.remote + '\n\nReinstall? (Can fix corrupted files)';
+    if (isServiceRunning) {
+      reinstallMsg = 'Already latest: ' + data.remote + '\n\nNote: Service is running. Restart required after download.\n\nReinstall?';
+    }
+    if (confirm(reinstallMsg)) {
+      startDownload(target, btn);
+    }
+  }
+}
+
+function startDownload(target, btn) {
+  // 清除旧的进度/错误信息（开始新操作）
+  var progressBox = document.getElementById('progress-' + target);
+  if (progressBox) {
+    progressBox.innerHTML = '';
+    progressBox.style.color = '';
+    progressBox.style.opacity = '1';
+  }
+  
+  // 禁用所有下载按钮，防止重复点击
+  var downloadBtn = document.getElementById('download-btn');
+  if (downloadBtn) {
+    downloadBtn.dataset.oldText = downloadBtn.innerText;
+    downloadBtn.dataset.oldColor = downloadBtn.style.background;
+    downloadBtn.disabled = true;
+    downloadBtn.style.background = '#777777';
+    downloadBtn.style.cursor = 'not-allowed';
+    downloadBtn.innerText = '下载中...';
+  }
+  
+    var box = document.getElementById('download-msg');
+    if (box) box.innerText = '已发起下载任务，正在准备...';
+  
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/plugins/easy-mihomo/api.php?cmd=start_download&target=' + encodeURIComponent(target));
+  xhr.onload = function(){
+    if (xhr.status === 200) {
+      if (box) box.innerText = (xhr.responseText || '').trim() || '任务已启动';
+    } else {
+      // 下载启动失败，恢复按钮
+      if (downloadBtn) {
+        downloadBtn.disabled = false;
+        downloadBtn.style.background = downloadBtn.dataset.oldColor || '#e67e22';
+        downloadBtn.style.cursor = 'pointer';
+        downloadBtn.innerText = downloadBtn.dataset.oldText || '下载核心';
+      }
+      // 显示错误
+      if (progressBox) {
+        progressBox.innerHTML = 'Download failed, please retry';
+        progressBox.style.color = '#e74c3c';
+      }
+    }
+  };
+  xhr.onerror = function(){
+    // 网络错误，恢复按钮
+    if (downloadBtn) {
+      downloadBtn.disabled = false;
+      downloadBtn.style.background = downloadBtn.dataset.oldColor || '#e67e22';
+      downloadBtn.style.cursor = 'pointer';
+      downloadBtn.innerText = downloadBtn.dataset.oldText || '下载核心';
+    }
+    // 显示错误
+    if (progressBox) {
+      progressBox.innerHTML = 'Network error, check connection';
+      progressBox.style.color = '#e74c3c';
+    }
+  };
+  xhr.send();
+}
+
+function pollProgress(target, elId) {
+  var lastStatus = '';
+  var errorTimeout = null;
+  var autoHideTimeout = null;
+  var intervalId = null;
+  
+  function tick(){
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/plugins/easy-mihomo/api.php?cmd=get_progress&target=' + encodeURIComponent(target));
+    xhr.onload = function(){
+      if (xhr.status === 200) {
+        var box = document.getElementById(elId);
+        if (!box) return;
+        
+        var txt = xhr.responseText || '';
+        if (txt.trim()) {
+          lastStatus = txt;
+          
+          // 检测错误信息
+          if (txt.includes('error:')) {
+            box.style.color = '#e74c3c';  // 红色
+            box.style.opacity = '1';
+            
+            // 构建错误消息：错误内容 + 重试链接 + 关闭按钮
+            var errorMsg = txt.replace('error:', 'Error:');
+            box.innerHTML = errorMsg + 
+              ' <a href="javascript:void(0)" onclick="smartDownload(\'' + target + '\', this); return false;" style="color:#007bff;text-decoration:underline;cursor:pointer;">重试</a>' +
+              ' <span onclick="clearErrorMessage(\'' + elId + '\')" style="color:#999;margin-left:8px;cursor:pointer;font-size:18px;line-height:1;font-weight:bold;transition:color 0.2s;" title="关闭提示" onmouseover="this.style.color=\'#dc3545\'" onmouseout="this.style.color=\'#999\'">×</span>';
+            
+            // 清除之前的定时器
+            if (errorTimeout) clearTimeout(errorTimeout);
+            if (autoHideTimeout) clearTimeout(autoHideTimeout);
+            
+            // 10秒后半透明显示（提示信息已过期）
+            errorTimeout = setTimeout(function() {
+              if (box && box.innerHTML.includes('Error:')) {
+                box.style.opacity = '0.6';
+
+                // 再过20秒（总共30秒）自动消失
+                autoHideTimeout = setTimeout(function() {
+                  if (box && box.innerHTML.includes('Error:')) {
+                    box.innerHTML = '';
+                    box.style.opacity = '1';
+                    box.style.color = '';
+                  }
+                }, 20000);
+              }
+            }, 10000);
+            
+          } else if (txt.includes('100%')) {
+            // 下载完成
+            box.style.color = '#27ae60';  // 绿色
+            box.style.opacity = '1';
+          box.innerText = txt;
+            
+            setTimeout(function(){
+              if (box) {
+                // 检查服务是否运行
+                var isServiceRunning = checkServiceRunning();
+                if (isServiceRunning && target === 'core') {
+                  // 核心下载完成且服务正在运行
+                  box.innerHTML = 'Core downloaded. <span style="color:#f39c12;font-weight:bold;">Restart service to apply.</span>';
+                  // 不自动刷新页面，让用户看到提示
+        } else {
+                  // 服务未运行或下载的是UI，正常刷新
+                  box.innerText = 'Download complete, refreshing...';
+                  // 刷新页面以显示新版本
+                  setTimeout(function(){
+                    window.location.reload();
+                  }, 2000);
+                }
+              }
+            }, 1000);
+            
+          } else {
+            // 正常进度
+            box.style.color = '#777777';  // 灰色
+            box.style.opacity = '1';
+            box.innerText = txt;
+          }
+        } else {
+          // 进度文件已被清理
+          if (lastStatus && lastStatus.includes('%') && !lastStatus.includes('100%') && !lastStatus.includes('error:')) {
+            // 如果之前有进度但不是100%或错误，现在没了，说明可能中断
+            box.innerText = 'Download may have been interrupted';
+            box.style.color = '#f39c12';
+            setTimeout(function(){ if (box) box.innerText=''; }, 5000);
+          } else if (lastStatus.includes('100%')) {
+            // 已经完成了
+            if (box) box.innerText = '';
+          }
+          lastStatus = '';
+        }
+      }
+    };
+    xhr.send();
+  }
+  
+  tick();
+  intervalId = setInterval(tick, 2000);
+  return intervalId;
+}
+
+// 手动清除错误消息
+function clearErrorMessage(elementId) {
+  var box = document.getElementById(elementId);
+  if (box) {
+    box.innerHTML = '';
+    box.style.opacity = '1';
+    box.style.color = '';
+  }
+}
+
+function openConfigEditor() {
+  document.getElementById('configModal').style.display = 'block';
+  // 禁用页面滚动
+  document.body.style.overflow = 'hidden';
+}
+
+function closeConfigEditor() {
+  document.getElementById('configModal').style.display = 'none';
+  // 恢复页面滚动
+  document.body.style.overflow = 'auto';
+}
+
+// 点击背景关闭弹出窗口
+document.addEventListener('click', function(event) {
+  var modal = document.getElementById('configModal');
+  if (event.target === modal) {
+    closeConfigEditor();
+  }
+});
+
+// ESC键关闭弹出窗口
+document.addEventListener('keydown', function(event) {
+  if (event.key === 'Escape') {
+    closeConfigEditor();
+  }
+});
+
+// 使用浏览器原生表单提交，确保 emhttp 正常接收带 Content-Length 的上传
+</script>
+</head>
+<body>
+
+<!-- 头部 -->
+<div class="header">
+  <h1>Mihomo</h1>
+  <div class="header-links">
+    <a href="https://t.me/+7jcTMePlNVwwZjg1" target="_blank" class="link-tg">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.161c-.18 1.897-.962 6.502-1.359 8.627-.168.9-.5 1.201-.82 1.23-.697.064-1.226-.461-1.901-.903-1.056-.693-1.653-1.124-2.678-1.8-1.185-.781-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.139-5.062 3.345-.479.329-.913.489-1.302.481-.428-.008-1.252-.241-1.865-.44-.752-.244-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.831-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635.099-.002.321.023.465.141.121.099.155.232.171.326.016.094.036.308.02.475z"/></svg>
+      <?= t('telegram') ?>
+    </a>
+    <a href="https://github.com/wlaosj" target="_blank" class="link-github">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+    <span class="author-info">by bigv</span>
+    <a href="?lang=<?= getLang() === 'cn' ? 'en' : 'cn' ?>" class="lang-toggle"><?= t('lang_toggle') ?></a>
+  </div>
+</div>
+
+<?php if ($installStatus) { echo '<div class="alert alert-warning">' . $installStatus . '</div>'; } ?>
+
+<!-- 状态横幅 -->
+<div class="status-banner">
+  <?php
+    $statusText = trim($status ?? 'unknown');
+    if (strpos($statusText, 'running') !== false) {
+      $pid = '';
+      if (preg_match('/pid=(\d+)/', $statusText, $matches)) { $pid = $matches[1]; }
+      echo '<div class="status-dot running"></div>';
+      echo '<span class="status-text">' . t('running') . '</span>';
+      if ($pid) echo '<span class="status-pid">' . t('pid') . ': ' . $pid . '</span>';
+    } elseif (strpos($statusText, 'stopped') !== false) {
+      echo '<div class="status-dot stopped"></div>';
+      echo '<span class="status-text">' . t('stopped') . '</span>';
+    } else {
+      echo '<div class="status-dot unknown"></div>';
+      echo '<span class="status-text">' . htmlspecialchars($statusText) . '</span>';
+    }
+  ?>
+</div>
+
+<!-- 卡片网格 -->
+<div class="grid">
+
+  <!-- 核心卡片 -->
+  <div class="card">
+    <div class="card-title">
+      <?= t('core_engine') ?>
+      <?php if ($binUdiskExists): ?>
+        <span class="badge badge-green"><?= t('installed') ?></span>
+      <?php else: ?>
+        <span class="badge badge-red"><?= t('not_installed') ?></span>
+      <?php endif; ?>
+    </div>
+
+    <?php if ($binUdiskExists): ?>
+      <div class="form-row">
+        <span class="form-label"><?= t('version') ?></span>
+        <span class="form-value" id="local-version"><?= htmlspecialchars(trim($version ?? 'unknown')) ?></span>
+        <?php
+          $variantLabels = [
+            'standard' => ['text' => t('standard'), 'color' => '#777777'],
+            'compatible' => ['text' => t('compatible'), 'color' => '#3498db'],
+            'v3' => ['text' => t('v3_optimized'), 'color' => '#27ae60']
+          ];
+          $label = $variantLabels[$installedVariant] ?? $variantLabels['standard'];
+          echo '<span class="badge" style="background:' . $label['color'] . '22;color:' . $label['color'] . ';">' . $label['text'] . '</span>';
+        ?>
+        <span id="update-info" style="margin-left:8px;font-weight:bold;"></span>
+      </div>
+      <div class="form-row">
+        <span class="form-label"><?= t('variant') ?></span>
+        <form method="POST" style="display:inline;margin:0;">
+          <input type="hidden" name="cmd" value="set_variant" />
+          <select name="variant" onchange="this.form.submit()" style="min-width:180px;">
+            <option value="standard" <?= $currentVariant === 'standard' ? 'selected' : '' ?>><?= t('standard_desc') ?></option>
+            <option value="compatible" <?= $currentVariant === 'compatible' ? 'selected' : '' ?>><?= t('compatible_desc') ?></option>
+            <option value="v3" <?= $currentVariant === 'v3' ? 'selected' : '' ?>><?= t('v3_desc') ?></option>
+          </select>
+        </form>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button id="download-btn" onclick="smartDownload('core', this)" class="btn btn-accent btn-sm"><?= t('reinstall') ?></button>
+        <button onclick="checkUpdate()" class="btn btn-dark btn-sm"><?= t('check_update') ?></button>
+      </div>
+    <?php else: ?>
+      <div class="form-row">
+        <span class="form-label"><?= t('version') ?></span>
+        <span class="form-value" style="color:var(--red);"><?= t('not_installed') ?></span>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button id="download-btn" onclick="smartDownload('core', this)" class="btn btn-green btn-sm"><?= t('download') ?></button>
+        <button onclick="checkUpdate()" class="btn btn-dark btn-sm"><?= t('check_latest') ?></button>
+      </div>
+    <?php endif; ?>
+    <div id="progress-core" class="progress-text"></div>
+    <div class="tip">
+      From <a href="https://github.com/MetaCubeX/mihomo/releases" target="_blank">GitHub Releases</a> <?= t('tip_manual_core') ?> <code>/boot/config/plugins/easy-mihomo/mihomo</code>
+    </div>
+  </div>
+
+  <!-- UI 卡片 -->
+  <div class="card">
+    <div class="card-title">
+      <?= t('dashboard_ui') ?>
+      <?php if ($uiExists): ?>
+        <span class="badge badge-green"><?= t('installed') ?></span>
+      <?php else: ?>
+        <span class="badge badge-red"><?= t('not_installed') ?></span>
+      <?php endif; ?>
+    </div>
+
+    <?php if ($uiExists): ?>
+      <div class="form-row">
+        <span class="form-label"><?= t('version') ?></span>
+        <span class="form-value" id="ui-local-version"><?= htmlspecialchars(trim($uiVersion ?? 'unknown')) ?></span>
+        <span id="ui-update-info" style="margin-left:8px;font-weight:bold;"></span>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button id="download-ui-btn" onclick="smartDownloadUI('ui', this)" class="btn btn-accent btn-sm"><?= t('reinstall') ?></button>
+        <button onclick="checkUIUpdate()" class="btn btn-dark btn-sm"><?= t('check_update') ?></button>
+      </div>
+    <?php else: ?>
+      <div class="form-row">
+        <span class="form-label"><?= t('version') ?></span>
+        <span class="form-value" style="color:var(--red);"><?= t('not_installed') ?></span>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button id="download-ui-btn" onclick="smartDownloadUI('ui', this)" class="btn btn-green btn-sm"><?= t('download') ?> UI</button>
+        <button onclick="checkUIUpdate()" class="btn btn-dark btn-sm"><?= t('check_latest') ?></button>
+      </div>
+    <?php endif; ?>
+    <div id="progress-ui" class="progress-text"></div>
+    <div class="form-row" style="margin-top:10px;">
+      <span class="form-label"><?= t('host') ?></span>
+      <span class="form-value" id="zash-host">-</span>
+    </div>
+    <div class="form-row">
+      <span class="form-label"><?= t('port') ?></span>
+      <span class="form-value"><?= $port ? htmlspecialchars($port) : '<span style="color:var(--red)">Not Set</span>' ?></span>
+    </div>
+    <div class="form-row">
+      <span class="form-label"><?= t('secret') ?></span>
+      <span class="form-value"><?= $secret ? htmlspecialchars($secret) : '<span style="color:var(--red)">Not Set</span>' ?></span>
+    </div>
+    <div class="tip">
+      <?= t('tip_manual_ui') ?>
+    </div>
+  </div>
+
+</div>
+
+<!-- 配置卡片（全宽） -->
+<div class="card" style="margin-bottom:20px;">
+  <div class="card-title"><?= t('configuration') ?></div>
+
+  <div class="form-row">
+    <span class="form-label"><?= t('profile') ?></span>
+    <form id="configForm" method="POST" style="display:inline;margin:0;">
+      <input type="hidden" name="cmd" value="select_conf" />
+      <select name="name" onchange="this.form.submit()" style="min-width:260px;">
+        <?php if (!$selectedName): ?>
+          <option value="" disabled selected><?= t('select_config') ?></option>
+        <?php endif; ?>
+        <?php foreach ($available as $f): ?>
+          <option value="<?= htmlspecialchars($f) ?>" <?= ($f === $selectedName ? 'selected' : '') ?>><?= htmlspecialchars($f) ?></option>
+        <?php endforeach; ?>
+      </select>
+    </form>
+    <button onclick="openConfigEditor()" <?= $selectedPath? '':'disabled' ?> class="btn btn-accent btn-sm">
+      <i class="fa fa-edit"></i> <?= $selectedPath? t('edit') : t('select_first') ?>
+    </button>
+    <button onclick="document.getElementById('configForm').submit()" class="btn btn-dark btn-sm"><?= t('refresh') ?></button>
+    <button onclick="openFileManager()" class="btn btn-dark btn-sm"><?= t('open_folder') ?></button>
+  </div>
+
+  <?php if ($selectedPath): ?>
+    <div class="form-row">
+      <span class="form-label"><?= t('path') ?></span>
+      <span style="font-size:12px;color:var(--text-dim);"><?= htmlspecialchars($selectedPath) ?></span>
+    </div>
+  <?php endif; ?>
+
+  <div class="tip" style="margin-top:10px;">
+    <svg style="display:inline-block;vertical-align:middle;margin-right:4px;" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.161c-.18 1.897-.962 6.502-1.359 8.627-.168.9-.5 1.201-.82 1.23-.697.064-1.226-.461-1.901-.903-1.056-.693-1.653-1.124-2.678-1.8-1.185-.781-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.139-5.062 3.345-.479.329-.913.489-1.302.481-.428-.008-1.252-.241-1.865-.44-.752-.244-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.831-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635.099-.002.321.023.465.141.121.099.155.232.171.326.016.094.036.308.02.475z"/></svg>
+    <strong><?= t('tip_no_config') ?></strong>
+    <a href="https://t.me/+7jcTMePlNVwwZjg1" target="_blank" style="color:#0088cc;"><?= t('telegram') ?></a>
+  </div>
+</div>
+
+<!-- 日志和启动设置 -->
+<div class="grid">
+
+  <!-- 日志卡片 -->
+  <div class="card">
+    <div class="card-title"><?= t('logs') ?></div>
+    <div class="form-row">
+      <span class="form-label"><?= t('size') ?></span>
+      <span class="form-value"><?= $logSizeFormatted ?></span>
+    </div>
+    <div class="form-row">
+      <span class="form-label"><?= t('lines') ?></span>
+      <span class="form-value"><?= $logLines ?></span>
+    </div>
+    <div class="form-row">
+      <span class="form-label"><?= t('cleanup') ?></span>
+      <span style="font-size:13px;color:var(--text-dim);"><?= t('cleanup_value') ?></span>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;">
+      <button onclick="openLogViewer()" class="btn btn-accent btn-sm">
+        <i class="fa fa-eye"></i> <?= t('view_logs') ?>
+      </button>
+    </div>
+  </div>
+
+  <!-- 启动设置卡片 -->
+  <div class="card">
+    <div class="card-title"><?= t('startup') ?></div>
+    <div class="form-row">
+      <form method="POST" style="display:inline;margin:0;">
+        <input type="hidden" name="cmd" value="set_bootstart" />
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px;">
+          <input type="checkbox" name="enable" value="1" <?= $bootstartOn ? 'checked' : '' ?> onchange="this.form.submit()" style="width:16px;height:16px;" />
+          <?= t('auto_start') ?>
+        </label>
+      </form>
+      <?php if ($bootstartOn): ?>
+        <span class="badge badge-green"><?= t('enabled') ?></span>
+      <?php else: ?>
+        <span class="badge badge-gray"><?= t('disabled') ?></span>
+      <?php endif; ?>
+    </div>
+  </div>
+
+</div>
+
+<!-- 操作栏 -->
+<div class="card" style="margin-top:0;">
+  <div class="actions" style="margin-top:0;padding-top:0;border-top:none;">
+    <button onclick="openConsole()" class="btn btn-accent"><?= t('open_console') ?></button>
+    <button onclick="executeAction('start')" class="btn btn-green"><?= t('start') ?></button>
+    <button onclick="executeAction('stop')" class="btn btn-red"><?= t('stop') ?></button>
+    <button onclick="executeAction('restart')" class="btn btn-yellow"><?= t('restart') ?></button>
+    <button onclick="executeAction('clearlog')" class="btn btn-dark"><?= t('clear_logs') ?></button>
+  </div>
+</div>
+
+<!-- 配置编辑弹出窗口 -->
+<div id="configModal" class="modal-overlay">
+  <div class="modal-content">
+    <h3><?= t('edit_config') ?>: <?= htmlspecialchars($selectedName) ?></h3>
+    <form method="POST" style="display:flex;flex-direction:column;">
+      <input type="hidden" name="cmd" value="saveconf" />
+      <textarea name="content" spellcheck="false" <?= $selectedPath? '':'disabled' ?>><?php echo htmlspecialchars($confText); ?></textarea>
+      <div class="modal-footer">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="restart" value="1" <?= $selectedPath? '':'disabled' ?> /> <?= t('save_restart') ?>
+        </label>
+        <div style="display:flex;gap:8px;">
+          <button type="button" onclick="closeConfigEditor()" class="btn btn-dark"><?= t('cancel') ?></button>
+          <button type="submit" <?= $selectedPath? '':'disabled' ?> class="btn btn-accent"><?= t('save') ?></button>
+        </div>
+      </div>
+    </form>
+    <small style="color:var(--text-dim);margin-top:10px;display:block;"><?= $selectedPath? t('save_tip') : t('no_config_tip') ?></small>
+  </div>
+</div>
+
+<!-- 日志查看器弹出窗口 -->
+<div id="logModal" class="modal-overlay">
+  <div class="modal-content">
+    <h3><?= t('log_viewer') ?></h3>
+    <div style="color:var(--text-dim);font-size:13px;margin-bottom:12px;">
+      <?= t('size') ?>: <?= $logSizeFormatted ?> | <?= t('lines') ?>: <?= $logLines ?>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button onclick="refreshLogViewer()" class="btn btn-accent btn-sm">
+        <i class="fa fa-refresh"></i> <?= t('refresh_log') ?>
+      </button>
+      <button onclick="executeLogAction('clearlog')" class="btn btn-red btn-sm">
+        <i class="fa fa-trash"></i> <?= t('clear_log') ?>
+      </button>
+    </div>
+    <pre id="logContent" style="max-height:500px;white-space:pre-wrap;word-wrap:break-word;"><?= htmlspecialchars($logTail) ?></pre>
+    <div class="modal-footer">
+      <div style="font-size:12px;color:var(--text-dim);">
+        <?= t('log_auto_clean') ?>
+      </div>
+      <button onclick="closeLogViewer()" class="btn btn-dark"><?= t('close') ?></button>
+    </div>
+  </div>
+</div>
+
+<div id="download-msg" style="font-size:12px;color:#777777;margin-top:6px"></div>
+<script>
+// 页面加载后开始轮询进度
+pollProgress('core', 'progress-core');
+pollProgress('ui', 'progress-ui');
+
+// 页面加载后自动检查更新（静默模式）
+window.addEventListener('load', function() {
+  // 1秒后检查核心更新
+  setTimeout(function() {
+    checkUpdate(true); // 静默模式，不显示"检查中..."提示
+  }, 1000);
+  
+  // 1.5秒后检查 UI 更新
+  setTimeout(function() {
+    checkUIUpdate(true); // 静默模式，不显示"检查中..."提示
+  }, 1500);
+  
+  // 定期更新按钮状态（每3秒检查一次服务状态）
+  setInterval(function() {
+    updateDownloadButtonState();
+    updateUIDownloadButtonState();
+  }, 3000);
+});
+
+// 填充 Zashboard 访问信息（主机/端口/密码）
+document.addEventListener('DOMContentLoaded', function() {
+  var elHost = document.getElementById('zash-host');
+  if (elHost) {
+    elHost.textContent = window.location.hostname || '-';
+  }
+});
+
+// 日志查看器功能
+function openLogViewer() {
+  document.getElementById('logModal').style.display = 'block';
+  // 自动滚动到底部显示最新日志
+  setTimeout(function() {
+    var logContent = document.getElementById('logContent');
+    logContent.scrollTop = logContent.scrollHeight;
+  }, 100);
+}
+
+function closeLogViewer() {
+  document.getElementById('logModal').style.display = 'none';
+}
+
+function refreshLogViewer() {
+  // 显示加载状态
+  var logContent = document.getElementById('logContent');
+  var originalContent = logContent.innerHTML;
+  logContent.innerHTML = '<span style="color:#777777;">正在刷新日志...</span>';
+  
+  // 刷新页面以获取最新日志
+  setTimeout(function() {
+    window.location.reload();
+  }, 500);
+}
+
+function executeLogAction(action) {
+  var actionText = '';
+  switch(action) {
+    case 'clearlog': actionText = 'Clear logs'; break;
+  }
+  
+  if (confirm(actionText + '?')) {
+    // 显示加载状态
+    var logContent = document.getElementById('logContent');
+    logContent.innerHTML = '<span style="color:#777777;">正在' + actionText + '...</span>';
+    
+    // 执行操作
+    var url = new URL(window.location);
+    url.searchParams.set('cmd', action);
+    
+    fetch(url.toString())
+      .then(function(response) {
+        return response.text();
+      })
+      .then(function(data) {
+        // 操作完成后刷新日志
+        setTimeout(function() {
+          window.location.reload();
+        }, 1000);
+      })
+      .catch(function(error) {
+        logContent.innerHTML = '<span style="color:#e74c3c;">操作失败: ' + error + '</span>';
+      });
+  }
+}
+
+// 点击模态框外部关闭
+window.onclick = function(event) {
+  var logModal = document.getElementById('logModal');
+  if (event.target == logModal) {
+    closeLogViewer();
+  }
+}
+
+// ESC键关闭模态框
+document.addEventListener('keydown', function(event) {
+  if (event.key === 'Escape') {
+    closeLogViewer();
+  }
+});
+</script>
+</body>
+</html>
+]]></INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/api.php">
+<INLINE><![CDATA[
+<?php
+// 轻量 API：纯文本返回，避免 emhttp 外层 HTML 包装
+require_once __DIR__ . '/include/common.php';
+
+header('Content-Type: text/plain; charset=utf-8');
+
+$baseRun = '/usr/local/emhttp/plugins/easy-mihomo';
+$scripts = $baseRun . '/scripts';
+$progressDir = '/var/tmp/easy-mihomo-progress';
+@mkdir($progressDir, 0777, true);
+
+$cmd = $_GET['cmd'] ?? $_POST['cmd'] ?? '';
+if ($cmd === 'get_progress') {
+  $target = $_GET['target'] ?? $_POST['target'] ?? '';
+  $file = '';
+  if ($target === 'core') $file = $progressDir . '/core.status';
+  if ($target === 'ui')   $file = $progressDir . '/ui.status';
+  if ($file && is_file($file)) { echo @file_get_contents($file); }
+  exit;
+}
+if ($cmd === 'check_update') {
+  header('Content-Type: application/json; charset=utf-8');
+  $updateInfo = shell_exec("bash $scripts/check_update.sh 2>&1");
+  echo $updateInfo;
+  exit;
+}
+// 检查 UI 更新
+if ($cmd === 'check_ui_update') {
+  header('Content-Type: application/json; charset=utf-8');
+  $uiUpdateInfo = shell_exec("bash $scripts/check_ui_update.sh 2>&1");
+  echo $uiUpdateInfo;
+  exit;
+}
+if ($cmd === 'start_download') {
+  $target = $_GET['target'] ?? $_POST['target'] ?? '';
+  if ($target === 'core') {
+    @unlink($progressDir . '/core.status');
+    $out = shell_exec("nohup bash $scripts/download_core.sh --progress >$progressDir/core.log 2>&1 & echo $!");
+    echo '核心下载任务已启动 PID: ' . trim($out);
+  } elseif ($target === 'ui') {
+    @unlink($progressDir . '/ui.status');
+    $out = shell_exec("nohup bash $scripts/download_ui.sh --progress >$progressDir/ui.log 2>&1 & echo $!");
+    echo 'UI 下载任务已启动 PID: ' . trim($out);
+  } else {
+    echo '未知的下载目标';
+  }
+  exit;
+}
+if ($cmd === 'dashboard_status') {
+  // 返回JSON格式的仪表板数据
+  header('Content-Type: application/json; charset=utf-8');
+  
+  // 获取mihomo状态
+  $status = shell_exec("bash $scripts/status.sh 2>&1");
+  $version = shell_exec("bash $scripts/version.sh 2>&1");
+  
+  $isRunning = strpos($status, 'running') !== false;
+  $pid = '';
+  if (preg_match('/pid=(\d+)/', $status, $matches)) {
+    $pid = $matches[1];
+  }
+  
+  // 获取内存使用信息
+  $memoryUsage = '0 MB';
+  if ($pid) {
+    $memoryInfo = shell_exec("ps -o rss= -p $pid 2>/dev/null");
+    if ($memoryInfo) {
+      $memoryKB = intval(trim($memoryInfo));
+      $memoryMB = round($memoryKB / 1024, 1);
+      $memoryUsage = $memoryMB . ' MB';
+    }
+  }
+  
+  // 获取运行时间信息
+  $uptime = '未知';
+  if ($pid) {
+    $startTime = shell_exec("ps -o lstart= -p $pid 2>/dev/null");
+    if ($startTime) {
+      $startTimestamp = strtotime(trim($startTime));
+      if ($startTimestamp) {
+        $currentTime = time();
+        $diff = $currentTime - $startTimestamp;
+        
+        $hours = floor($diff / 3600);
+        $minutes = floor(($diff % 3600) / 60);
+        
+        if ($hours > 0) {
+          $uptime = $hours . 'h' . $minutes . 'm';
+        } else {
+          $uptime = $minutes . 'm';
+        }
+      }
+    }
+  }
+  
+  // 获取配置信息
+  $confDir = '/boot/config/plugins/easy-mihomo';
+  $selectFile = $confDir . '/selected.conf';
+  $selectedName = is_file($selectFile) ? trim(@file_get_contents($selectFile)) : '';
+  $selectedPath = ($selectedName && is_file($confDir . '/' . $selectedName)) ? ($confDir . '/' . $selectedName) : '';
+  
+  // 解析配置文件中的端口和密码信息
+  $configValues = getMihomoConfigValues($selectedPath);
+  $controller = $configValues['controller'];
+  $secret = $configValues['secret'];
+  $port = $configValues['port'];
+  
+  $result = [
+    'running' => $isRunning,
+    'status' => trim($status),
+    'version' => trim($version),
+    'pid' => $pid,
+    'memory' => $memoryUsage,
+    'uptime' => $uptime,
+    'config' => [
+      'selected_config' => $selectedName,
+      'config_path' => $selectedPath,
+      'has_config' => !empty($selectedPath),
+      'controller' => $controller,
+      'secret' => $secret,
+      'port' => $port
+    ]
+  ];
+  
+  echo json_encode($result);
+  exit;
+}
+if ($cmd === 'start') {
+  $out = shell_exec("bash $scripts/start.sh 2>&1");
+  echo htmlspecialchars($out ?? '');
+  exit;
+}
+if ($cmd === 'stop') {
+  $out = shell_exec("bash $scripts/stop.sh 2>&1");
+  echo htmlspecialchars($out ?? '');
+  exit;
+}
+if ($cmd === 'restart') {
+  $out = shell_exec("bash $scripts/restart.sh 2>&1");
+  echo htmlspecialchars($out ?? '');
+  exit;
+}
+echo 'unknown command';
+]]></INLINE>
+</FILE>
+
+<!-- scripts -->
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/start.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+BIN="/usr/local/bin/mihomo"
+CONF_DIR="/boot/config/plugins/easy-mihomo"
+SELECT_FILE="$CONF_DIR/selected.conf"
+if [ -f "$SELECT_FILE" ]; then
+  NAME=$(cat "$SELECT_FILE" 2>/dev/null || true)
+  if [ -n "$NAME" ] && [ -f "$CONF_DIR/$NAME" ]; then
+    CONF_FILE="$CONF_DIR/$NAME"
+  else
+    echo "未找到有效的已选配置 ("$NAME")" >&2; exit 1
+  fi
+else
+  echo "未选择配置，请先在页面中选择" >&2; exit 1
+fi
+LOG_FILE="/var/log/mihomo.log"
+PID_FILE="/var/run/mihomo.pid"
+
+# 防重复启动检查（必须在最前面）
+if [ -f "$PID_FILE" ]; then
+  PID=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [ -n "$PID" ] && ps -p "$PID" >/dev/null 2>&1; then
+    echo "running (pid $PID)"
+    exit 0
+  fi
+fi
+
+# 启动前清理日志（防止日志过大影响性能）
+LOG_CLEANUP_SCRIPT="/usr/local/emhttp/plugins/easy-mihomo/scripts/log_cleanup.sh"
+if [ -x "$LOG_CLEANUP_SCRIPT" ]; then
+  "$LOG_CLEANUP_SCRIPT" >/dev/null 2>&1 || true
+fi
+
+# 简化核心文件检查（不再比较版本号）
+# 原理：下载核心时会删除内存文件，下次启动时自动从U盘复制最新版本
+  UDISK_BIN="/boot/config/plugins/easy-mihomo/mihomo"
+
+# 检查U盘核心是否存在
+if [ ! -f "$UDISK_BIN" ]; then
+  if [ ! -f "$BIN" ]; then
+    echo "核心文件缺失，请先下载核心" >> "$LOG_FILE" 2>&1
+    echo "核心文件缺失，请先下载核心"
+    exit 1
+  fi
+  # U盘没有但内存有（罕见情况），继续使用内存版本
+  echo "警告：U盘核心文件不存在，使用内存现有版本" >> "$LOG_FILE" 2>&1
+else
+  # 检查内存中是否有核心
+  if [ ! -f "$BIN" ]; then
+    # 内存中不存在，从U盘复制（首次启动或更新核心后）
+    echo "检测到内存中无核心文件，从U盘复制..." >> "$LOG_FILE" 2>&1
+    mkdir -p /usr/local/bin
+    cp -f "$UDISK_BIN" "$BIN"
+    chmod +x "$BIN"
+    echo "核心文件已从U盘复制到内存" >> "$LOG_FILE" 2>&1
+  else
+    # 内存中已存在，直接使用（不进行版本比较）
+    echo "核心文件就绪，直接启动" >> "$LOG_FILE" 2>&1
+  fi
+fi
+
+# UI 运行于内存，直接修改配置文件路径指向内存目录
+UI_ZIP_PATH="/boot/config/plugins/easy-mihomo/zashboard.zip"
+UI_RAM_DIR="/var/tmp/easy-mihomo-ui/zashboard"
+
+# 每次启动都重新解压UI到内存（确保最新）
+if [ -f "$UI_ZIP_PATH" ]; then
+  echo "解压 UI 到内存（覆盖）..." >> "$LOG_FILE" 2>&1
+  rm -rf "$UI_RAM_DIR" && mkdir -p "$UI_RAM_DIR"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -oq "$UI_ZIP_PATH" -d "$UI_RAM_DIR" >> "$LOG_FILE" 2>&1 || true
+  elif command -v busybox >/dev/null 2>&1; then
+    busybox unzip -oq "$UI_ZIP_PATH" -d "$UI_RAM_DIR" >> "$LOG_FILE" 2>&1 || true
+  fi
+  # 若有 dist/ 子目录，上移其内容并删除
+  if [ -d "$UI_RAM_DIR/dist" ]; then
+    cp -rf "$UI_RAM_DIR/dist/." "$UI_RAM_DIR/" 2>>"$LOG_FILE" || true
+    rm -rf "$UI_RAM_DIR/dist" 2>>"$LOG_FILE" || true
+  fi
+  echo "UI 解压完成" >> "$LOG_FILE" 2>&1
+else
+  echo "UI zip文件不存在，跳过解压" >> "$LOG_FILE" 2>&1
+fi
+
+# 在mihomo工作目录内创建bind mount指向内存UI目录
+UI_MOUNT_DIR="/boot/config/plugins/easy-mihomo/ui/zashboard"
+echo "创建UI bind mount..." >> "$LOG_FILE" 2>&1
+
+# 确保目标目录存在
+mkdir -p "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || true
+
+# 如果已经挂载，先卸载
+if mountpoint -q "$UI_MOUNT_DIR" 2>/dev/null; then
+  echo "卸载现有bind mount: $UI_MOUNT_DIR" >> "$LOG_FILE" 2>&1
+  umount "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || umount -l "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || true
+fi
+
+# 清理目录内容（如果存在）
+if [ -d "$UI_MOUNT_DIR" ] && [ ! -L "$UI_MOUNT_DIR" ]; then
+  echo "清理目录内容: $UI_MOUNT_DIR" >> "$LOG_FILE" 2>&1
+  rm -rf "$UI_MOUNT_DIR"/* 2>>"$LOG_FILE" || true
+fi
+
+# 创建bind mount
+echo "创建bind mount: $UI_MOUNT_DIR <- $UI_RAM_DIR" >> "$LOG_FILE" 2>&1
+mount --bind "$UI_RAM_DIR" "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || {
+  echo "bind mount创建失败，尝试清理后重试..." >> "$LOG_FILE" 2>&1
+  # 如果失败，清理目录后重试
+  rm -rf "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || true
+  mkdir -p "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || true
+  mount --bind "$UI_RAM_DIR" "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || true
+}
+
+# 验证bind mount是否成功
+if mountpoint -q "$UI_MOUNT_DIR" 2>/dev/null; then
+  echo "bind mount创建成功" >> "$LOG_FILE" 2>&1
+else
+  echo "bind mount创建失败，使用软链接作为备选方案..." >> "$LOG_FILE" 2>&1
+  rm -rf "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || true
+  ln -s "$UI_RAM_DIR" "$UI_MOUNT_DIR" 2>>"$LOG_FILE" || true
+fi
+
+# 检查并修复配置文件中的UI路径
+if [ -f "$CONF_FILE" ]; then
+  # 进行标准化处理前，备份一次配置（仅保留单个备份文件）
+  cp "$CONF_FILE" "$CONF_FILE.bak" 2>/dev/null || true
+
+  # 只覆写UI相关配置项，保障UI功能正常
+  DESIRED_UI_URL="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+  DESIRED_UI_NAME="zashboard"
+  DESIRED_UI_PATH="ui"
+
+  upsert_yaml_key(){
+    local key="$1"; shift
+    local val="$1"; shift
+    # 转义 / 和 &，避免 sed 替换冲突
+    local esc_val
+    esc_val=$(printf '%s' "$val" | sed 's/[&\/]/\\&/g')
+    if grep -qE "^${key}:" "$CONF_FILE"; then
+      sed -i "s|^${key}:.*|${key}: ${esc_val}|g" "$CONF_FILE"
+    else
+      echo "${key}: ${val}" >> "$CONF_FILE"
+    fi
+  }
+
+  echo "标准化UI配置项（external-ui-url / external-ui-name / external-ui）..." >> "$LOG_FILE" 2>&1
+  upsert_yaml_key "external-ui-url" "$DESIRED_UI_URL"
+  upsert_yaml_key "external-ui-name" "$DESIRED_UI_NAME"
+  upsert_yaml_key "external-ui" "$DESIRED_UI_PATH"
+else
+  echo "配置文件不存在，跳过UI路径检查" >> "$LOG_FILE" 2>&1
+fi
+
+if [ ! -x "$BIN" ]; then echo "二进制缺失: $BIN" >&2; exit 1; fi
+if [ ! -f "$CONF_FILE" ]; then echo "配置文件缺失: $CONF_FILE" >&2; exit 1; fi
+
+# 尝试加载 TUN（忽略失败）
+modprobe tun 2>/dev/null || true
+
+# 后台启动
+nohup "$BIN" -d "$CONF_DIR" -f "$CONF_FILE" >> "$LOG_FILE" 2>&1 &
+NEWPID=$!
+echo $NEWPID > "$PID_FILE"
+sleep 1
+
+if ps -p "$NEWPID" >/dev/null 2>&1; then
+  echo "started (pid $NEWPID)"
+  exit 0
+else
+  echo "start failed, see $LOG_FILE" >&2
+  exit 1
+fi
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/stop.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+PID_FILE="/var/run/mihomo.pid"
+
+# 优先按 pidfile 停止
+if [ -f "$PID_FILE" ]; then
+  PID=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [ -n "$PID" ] && ps -p "$PID" >/dev/null 2>&1; then
+    kill "$PID" 2>/dev/null || true
+  fi
+fi
+
+# 兜底按进程名停止
+if pgrep -x mihomo >/dev/null 2>&1; then
+  # 等待优雅退出
+  for i in $(seq 1 5); do
+    if pgrep -x mihomo >/dev/null 2>&1; then
+      sleep 1
+    else
+      break
+    fi
+  done
+  # 仍存活则强杀
+  if pgrep -x mihomo >/dev/null 2>&1; then
+    pkill -9 -x mihomo 2>/dev/null || true
+  fi
+fi
+
+# 清理UI bind mount或软链接
+UI_MOUNT_DIR="/boot/config/plugins/easy-mihomo/ui/zashboard"
+if mountpoint -q "$UI_MOUNT_DIR" 2>/dev/null; then
+  echo "卸载bind mount: $UI_MOUNT_DIR" >&2
+  umount "$UI_MOUNT_DIR" 2>/dev/null || umount -l "$UI_MOUNT_DIR" 2>/dev/null || true
+elif [ -L "$UI_MOUNT_DIR" ]; then
+  echo "清理软链接: $UI_MOUNT_DIR" >&2
+  rm -f "$UI_MOUNT_DIR" 2>/dev/null || true
+elif [ -d "$UI_MOUNT_DIR" ]; then
+  echo "清理目录: $UI_MOUNT_DIR" >&2
+  rm -rf "$UI_MOUNT_DIR" 2>/dev/null || true
+fi
+
+# 清理 pidfile（若进程已不存在）
+if [ -f "$PID_FILE" ]; then
+  if ! ps -p $(cat "$PID_FILE" 2>/dev/null || echo 0) >/dev/null 2>&1; then
+    rm -f "$PID_FILE"
+  fi
+fi
+
+echo "stopped"
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/restart.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+SCRIPT_DIR="/usr/local/emhttp/plugins/easy-mihomo/scripts"
+
+bash "$SCRIPT_DIR/stop.sh" || true
+sleep 1
+bash "$SCRIPT_DIR/start.sh"
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/status.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+PID_FILE="/var/run/mihomo.pid"
+STATUS="stopped"; PID=""
+if pgrep -x mihomo >/dev/null 2>&1; then STATUS="running"; PID=$(pgrep -x mihomo | head -n1); fi
+echo "status=$STATUS pid=$PID"
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/version.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+VERSION_FILE="/boot/config/plugins/easy-mihomo/.version"
+
+# 读取版本文件（格式：版本号|版本类型，例如：1.19.15|v3）
+if [ -f "$VERSION_FILE" ]; then
+  CONTENT=$(cat "$VERSION_FILE" 2>/dev/null | tr -d '\n\r' || echo "")
+  if [ -n "$CONTENT" ]; then
+    # 提取版本号（分隔符前的部分）
+    VERSION=$(echo "$CONTENT" | cut -d'|' -f1)
+    if [ -n "$VERSION" ]; then
+      echo "$VERSION"
+      exit 0
+    fi
+  fi
+fi
+
+# 版本文件不存在或为空
+echo "unknown"
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/ui_version.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+UI_VERSION_FILE="/boot/config/plugins/easy-mihomo/.ui-version"
+
+# 读取 UI 版本文件
+if [ -f "$UI_VERSION_FILE" ]; then
+  UI_VERSION=$(cat "$UI_VERSION_FILE" 2>/dev/null | tr -d '\n\r' || echo "")
+  if [ -n "$UI_VERSION" ]; then
+    echo "$UI_VERSION"
+    exit 0
+  fi
+fi
+
+# 版本文件不存在或为空
+echo "unknown"
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/check_update.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+
+GITHUB_REPO="MetaCubeX/mihomo"
+GITHUB_API="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+TMP_JSON="/tmp/mihomo-check-update.json"
+VERSION_FILE="/boot/config/plugins/easy-mihomo/.version"
+
+# 读取版本文件（格式：版本号|版本类型，例如：1.19.15|v3）
+LOCAL_VERSION=""
+if [ -f "$VERSION_FILE" ]; then
+  CONTENT=$(cat "$VERSION_FILE" 2>/dev/null | tr -d '\n\r' || echo "")
+  if [ -n "$CONTENT" ]; then
+    # 提取版本号（分隔符前的部分）
+    LOCAL_VERSION=$(echo "$CONTENT" | cut -d'|' -f1)
+  fi
+fi
+
+# 如果版本文件不存在或为空，检查核心文件是否存在
+if [ -z "$LOCAL_VERSION" ]; then
+  UDISK_BIN="/boot/config/plugins/easy-mihomo/mihomo"
+  if [ -f "$UDISK_BIN" ]; then
+    LOCAL_VERSION="unknown"
+  else
+    LOCAL_VERSION="not installed"
+  fi
+fi
+
+# 获取远程最新版本（使用分段超时）
+REMOTE_VERSION=""
+if wget -q --connect-timeout=8 --read-timeout=15 --tries=2 --waitretry=2 -O "$TMP_JSON" "$GITHUB_API" 2>/dev/null; then
+  REMOTE_VERSION=$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$TMP_JSON" | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/')
+  rm -f "$TMP_JSON"
+fi
+
+# 输出结果（JSON格式）
+echo "{"
+echo "  \"local\": \"$LOCAL_VERSION\","
+echo "  \"remote\": \"$REMOTE_VERSION\","
+
+if [ -z "$REMOTE_VERSION" ]; then
+  echo "  \"has_update\": false,"
+  echo "  \"message\": \"无法获取远程版本信息\""
+elif [ "$LOCAL_VERSION" = "not installed" ]; then
+  echo "  \"has_update\": true,"
+  echo "  \"message\": \"核心未安装，最新版本: $REMOTE_VERSION\""
+elif [ "$LOCAL_VERSION" != "$REMOTE_VERSION" ]; then
+  echo "  \"has_update\": true,"
+  echo "  \"message\": \"发现新版本: $REMOTE_VERSION\""
+else
+  echo "  \"has_update\": false,"
+  echo "  \"message\": \"已是最新版本\""
+fi
+
+echo "}"
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/check_ui_update.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+
+GITHUB_REPO="Zephyruso/zashboard"
+GITHUB_API="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+TMP_JSON="/tmp/zashboard-check-update.json"
+UI_VERSION_FILE="/boot/config/plugins/easy-mihomo/.ui-version"
+
+# 获取本地 UI 版本
+LOCAL_UI_VERSION=""
+if [ -f "$UI_VERSION_FILE" ]; then
+  LOCAL_UI_VERSION=$(cat "$UI_VERSION_FILE" 2>/dev/null | tr -d '\n\r' || echo "")
+fi
+
+# 如果本地版本不存在，检查 ZIP 文件是否存在
+if [ -z "$LOCAL_UI_VERSION" ]; then
+  UI_ZIP="/boot/config/plugins/easy-mihomo/zashboard.zip"
+  if [ -f "$UI_ZIP" ]; then
+    LOCAL_UI_VERSION="unknown"
+  else
+    LOCAL_UI_VERSION="not installed"
+  fi
+fi
+
+# 获取远程最新版本
+REMOTE_UI_VERSION=""
+if wget -q --connect-timeout=8 --read-timeout=15 --tries=2 --waitretry=2 -O "$TMP_JSON" "$GITHUB_API" 2>/dev/null; then
+  REMOTE_UI_VERSION=$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$TMP_JSON" | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/')
+  rm -f "$TMP_JSON"
+fi
+
+# 输出 JSON 结果
+echo "{"
+echo "  \"local\": \"$LOCAL_UI_VERSION\","
+echo "  \"remote\": \"$REMOTE_UI_VERSION\","
+
+if [ -z "$REMOTE_UI_VERSION" ]; then
+  echo "  \"has_update\": false,"
+  echo "  \"message\": \"无法获取远程版本信息\""
+elif [ "$LOCAL_UI_VERSION" = "not installed" ]; then
+  echo "  \"has_update\": true,"
+  echo "  \"message\": \"UI 未安装，最新版本: $REMOTE_UI_VERSION\""
+elif [ "$LOCAL_UI_VERSION" = "unknown" ]; then
+  echo "  \"has_update\": true,"
+  echo "  \"message\": \"无法确定本地版本，远程版本: $REMOTE_UI_VERSION\""
+elif [ "$LOCAL_UI_VERSION" != "$REMOTE_UI_VERSION" ]; then
+  echo "  \"has_update\": true,"
+  echo "  \"message\": \"发现新版本: $REMOTE_UI_VERSION\""
+else
+  echo "  \"has_update\": false,"
+  echo "  \"message\": \"已是最新版本\""
+fi
+
+echo "}"
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/download_core.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+
+PROGRESS=0
+if [ "$1" = "--progress" ]; then PROGRESS=1; fi
+
+GITHUB_REPO="MetaCubeX/mihomo"
+GITHUB_API="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+TMP_BIN="/tmp/mihomo-latest"
+TMP_JSON="/tmp/mihomo-release.json"
+STATUS_DIR="/var/tmp/easy-mihomo-progress"
+STATUS_FILE="$STATUS_DIR/core.status"
+VERSION_FILE="/boot/config/plugins/easy-mihomo/.version"
+VARIANT_FILE="/boot/config/plugins/easy-mihomo/variant.conf"
+mkdir -p "$STATUS_DIR"
+
+# 读取用户选择的版本类型（默认 standard）
+VARIANT="standard"
+if [ -f "$VARIANT_FILE" ]; then
+  VARIANT=$(cat "$VARIANT_FILE" 2>/dev/null | tr -d '\n\r' || echo "standard")
+  # 验证有效性
+  case "$VARIANT" in
+    standard|compatible|v3) ;;
+    *) VARIANT="standard" ;;
+  esac
+fi
+
+write_status(){
+  echo "$1"
+  if [ "$PROGRESS" = "1" ]; then echo "$1" > "$STATUS_FILE"; fi
+}
+
+trap 'write_status "error: unexpected failure"' ERR
+
+write_status "5%: 正在获取最新版本信息..."
+
+# 获取最新 release 信息（使用分段超时）
+if ! wget -q --connect-timeout=10 --read-timeout=20 --tries=2 --waitretry=2 -O "$TMP_JSON" "$GITHUB_API"; then
+  write_status "error: 无法连接到 GitHub API，请检查网络连接或稍后重试"
+  rm -f "$TMP_JSON"
+  exit 1
+fi
+
+write_status "10%: 解析版本信息..."
+
+# 提取版本号
+RELEASE_TAG=$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$TMP_JSON" | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/')
+
+if [ -z "$RELEASE_TAG" ]; then
+  write_status "error: 无法解析版本信息，GitHub API 响应异常"
+  rm -f "$TMP_JSON"
+  exit 1
+fi
+
+# 根据用户选择的版本类型构建文件名模式
+case "$VARIANT" in
+  compatible)
+    # 兼容版：mihomo-linux-amd64-compatible-v{版本号}.gz
+    PATTERN="mihomo-linux-amd64-compatible-v${RELEASE_TAG}\.gz"
+    VARIANT_NAME="兼容版"
+    ;;
+  v3)
+    # v3优化版：mihomo-linux-amd64-v3-v{版本号}.gz
+    PATTERN="mihomo-linux-amd64-v3-v${RELEASE_TAG}\.gz"
+    VARIANT_NAME="v3优化版"
+    ;;
+  *)
+    # 标准版：mihomo-linux-amd64-v{版本号}.gz（需排除 compatible 和 v3）
+    PATTERN="mihomo-linux-amd64-v${RELEASE_TAG}\.gz"
+    VARIANT_NAME="标准版"
+    ;;
+esac
+
+# 提取下载地址
+DOWNLOAD_URL=$(grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*'"$PATTERN"'"' "$TMP_JSON" | head -n1 | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+if [ -z "$DOWNLOAD_URL" ]; then
+  write_status "error: 找不到 ${VARIANT_NAME} 的下载地址，请检查版本类型选择"
+  rm -f "$TMP_JSON"
+  exit 1
+fi
+
+write_status "15%: 发现最新版本 v$RELEASE_TAG (${VARIANT_NAME})"
+write_status "20%: 开始下载核心文件（约12MB，根据网速需要10-60秒）..."
+
+# 下载二进制文件（使用分段超时，支持慢速网络）
+# --connect-timeout=15: 连接建立超时15秒（快速发现断网）
+# --read-timeout=120: 数据传输超时120秒（允许慢速网络）
+# --tries=3: 失败后重试3次
+# --waitretry=5: 重试间隔5秒
+if ! wget -q --connect-timeout=15 --read-timeout=120 --tries=3 --waitretry=5 --show-progress -O "$TMP_BIN.gz" "$DOWNLOAD_URL" 2>&1 | while IFS= read -r line; do
+  # 尝试解析 wget 进度
+  if echo "$line" | grep -q "%"; then
+    PERCENT=$(echo "$line" | grep -o '[0-9]\+%' | head -n1 | tr -d '%')
+    if [ -n "$PERCENT" ] && [ "$PERCENT" -ge 20 ] && [ "$PERCENT" -le 80 ]; then
+      write_status "$PERCENT%: 正在下载..."
+    fi
+  fi
+done; then
+  write_status "error: 下载超时或网络中断（已尝试3次），请检查网络后点击重试"
+  rm -f "$TMP_JSON" "$TMP_BIN.gz"
+  exit 1
+fi
+
+write_status "85%: 下载完成，正在解压..."
+
+# 解压文件
+if gunzip -c "$TMP_BIN.gz" > "$TMP_BIN" 2>/dev/null; then
+  chmod +x "$TMP_BIN"
+else
+  write_status "error: 解压失败，文件可能损坏，请重试下载"
+  rm -f "$TMP_JSON" "$TMP_BIN.gz" "$TMP_BIN"
+  exit 1
+fi
+
+# 验证文件完整性
+if [ ! -s "$TMP_BIN" ]; then
+  write_status "error: 文件损坏或不完整，请重试下载"
+  rm -f "$TMP_JSON" "$TMP_BIN.gz" "$TMP_BIN"
+  exit 1
+fi
+
+write_status "90%: 正在安装核心..."
+mkdir -p /boot/config/plugins/easy-mihomo
+
+# 简化策略：只保存到U盘，删除内存核心（强制下次启动同步）
+write_status "92%: 正在保存核心到U盘..."
+cp -f "$TMP_BIN" /boot/config/plugins/easy-mihomo/mihomo
+chmod +x /boot/config/plugins/easy-mihomo/mihomo 2>/dev/null || true
+
+# 保存版本信息（版本号 + 版本类型，用于前端显示）
+echo "${RELEASE_TAG}|${VARIANT}" > "$VERSION_FILE"
+
+# 删除内存中的核心（无论服务是否运行）
+# 原理：下次启动时会从U盘复制最新版本，确保更新生效
+write_status "94%: 清理内存中的旧核心（下次启动将使用新版本）..."
+rm -f /usr/local/bin/mihomo
+
+write_status "96%: 清理临时文件..."
+rm -f "$TMP_BIN" "$TMP_BIN.gz" "$TMP_JSON"
+
+write_status "100%: 核心安装完成 (v$RELEASE_TAG ${VARIANT_NAME})"
+( sleep 2; rm -f "$STATUS_FILE" ) >/dev/null 2>&1 &
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/scripts/download_ui.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+set -e
+
+PROGRESS=0
+if [ "$1" = "--progress" ]; then PROGRESS=1; fi
+
+GITHUB_REPO="Zephyruso/zashboard"
+GITHUB_API="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+UI_URL="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+UI_ROOT="/boot/config/plugins/easy-mihomo"
+ZIP_PATH="$UI_ROOT/zashboard.zip"
+RAM_ROOT="/var/tmp/easy-mihomo-ui"
+RAM_DIR="$RAM_ROOT/zashboard"
+STATUS_DIR="/var/tmp/easy-mihomo-progress"
+STATUS_FILE="$STATUS_DIR/ui.status"
+TMP_DIR="/tmp/easy-mihomo-ui"
+ZIP_FILE="$TMP_DIR/dist.zip"
+TMP_JSON="$TMP_DIR/release.json"
+UI_VERSION_FILE="$UI_ROOT/.ui-version"
+
+mkdir -p "$STATUS_DIR" "$TMP_DIR" "$UI_ROOT" "$RAM_DIR"
+
+write_status(){
+  echo "$1"
+  if [ "$PROGRESS" = "1" ]; then echo "$1" > "$STATUS_FILE"; fi
+}
+
+trap 'write_status "error: unexpected failure"' ERR
+
+write_status "5%: 正在获取 UI 版本信息..."
+# 获取版本信息（可选，失败不影响下载）
+UI_VERSION="unknown"
+if wget -q --connect-timeout=8 --read-timeout=10 --tries=2 -O "$TMP_JSON" "$GITHUB_API" 2>/dev/null; then
+  UI_VERSION=$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$TMP_JSON" | head -n1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\?\([^"]*\)".*/\1/' || echo "unknown")
+  rm -f "$TMP_JSON"
+fi
+
+write_status "10%: 正在下载 UI 包（约5MB，版本: $UI_VERSION）..."
+if ! wget -qO "$ZIP_FILE" --connect-timeout=10 --read-timeout=60 --tries=3 --waitretry=3 "$UI_URL"; then
+  write_status "error: UI 下载超时或网络中断（已尝试3次），请检查网络后重试"; rm -rf "$TMP_DIR"; exit 1
+fi
+
+write_status "60%: 正在保存到U盘..."
+# 单次顺序写入到 U 盘，减少随机写
+mv -f "$ZIP_FILE" "$ZIP_PATH"
+
+write_status "90%: 正在解压到内存..."
+# 在内存目录中解压（覆盖现有）
+rm -rf "$RAM_DIR" && mkdir -p "$RAM_DIR"
+if command -v unzip >/dev/null 2>&1; then
+  unzip -oq "$ZIP_PATH" -d "$RAM_DIR" || {
+    write_status "error: UI 解压失败，文件可能损坏，请重试下载"
+    rm -rf "$TMP_DIR"
+    exit 1
+  }
+elif command -v busybox >/dev/null 2>&1; then
+  busybox unzip -oq "$ZIP_PATH" -d "$RAM_DIR" || {
+    write_status "error: UI 解压失败，文件可能损坏，请重试下载"
+    rm -rf "$TMP_DIR"
+    exit 1
+  }
+else
+  write_status "error: 系统缺少 unzip 工具，无法解压 UI"
+  rm -rf "$TMP_DIR"
+  exit 1
+fi
+# 规范化：如果解压后存在 dist/ 子目录，移动其内容到根并删除 dist/
+if [ -d "$RAM_DIR/dist" ]; then
+  cp -rf "$RAM_DIR/dist/." "$RAM_DIR/"
+  rm -rf "$RAM_DIR/dist"
+fi
+
+rm -rf "$TMP_DIR"
+
+# 保存 UI 版本信息
+echo "$UI_VERSION" > "$UI_VERSION_FILE"
+
+write_status "100%: UI 已保存到U盘并解压到内存 (v$UI_VERSION)"
+( sleep 1; rm -f "$STATUS_FILE" ) >/dev/null 2>&1 &
+]]></INLINE>
+</FILE>
+
+<!-- Main page content -->
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/EasyMihomo.Main.page">
+<INLINE><![CDATA[
+Menu="Utilities"
+Type="xmenu"
+Title="Easy-Mihomo"
+Icon="icon-network"
+Tabs="false"
+---
+<?php
+include '/usr/local/emhttp/plugins/easy-mihomo/index.php';
+?>
+]]></INLINE>
+</FILE>
+
+<!-- Dashboard page content -->
+<FILE Name="/usr/local/emhttp/plugins/easy-mihomo/EasyMihomo.Dashboard.page">
+<INLINE><![CDATA[
+Menu="Dashboard:0"
+Icon="icon-network"
+---
+<?php
+/*
+  MIT License
+
+  Copyright (c) 2024 Easy-Mihomo
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+*/
+
+require_once('/usr/local/emhttp/plugins/dynamix/include/Wrappers.php');
+$pluginname = "easy-mihomo";
+
+// 获取mihomo状态
+function getMihomoStatus() {
+    $status = shell_exec("bash /usr/local/emhttp/plugins/easy-mihomo/scripts/status.sh 2>&1");
+    $version = shell_exec("bash /usr/local/emhttp/plugins/easy-mihomo/scripts/version.sh 2>&1");
+    
+    $isRunning = strpos($status, 'running') !== false;
+    $pid = '';
+    if (preg_match('/pid=(\d+)/', $status, $matches)) {
+        $pid = $matches[1];
+    }
+    
+    return [
+        'running' => $isRunning,
+        'status' => trim($status),
+        'version' => trim($version),
+        'pid' => $pid
+    ];
+}
+
+// 获取配置信息
+function getMihomoConfig() {
+    $confDir = '/boot/config/plugins/easy-mihomo';
+    $selectFile = $confDir . '/selected.conf';
+    $selectedName = is_file($selectFile) ? trim(@file_get_contents($selectFile)) : '';
+    $selectedPath = ($selectedName && is_file($confDir . '/' . $selectedName)) ? ($confDir . '/' . $selectedName) : '';
+    
+    return [
+        'selected_config' => $selectedName,
+        'config_path' => $selectedPath,
+        'has_config' => !empty($selectedPath)
+    ];
+}
+
+// 获取日志信息
+function getMihomoLogInfo() {
+    $logFile = '/var/log/mihomo.log';
+    $logSize = file_exists($logFile) ? filesize($logFile) : 0;
+    $logLines = file_exists($logFile) ? count(file($logFile)) : 0;
+    
+    function formatBytes($size, $precision = 2) {
+        $units = array('B', 'KB', 'MB', 'GB', 'TB');
+        for ($i = 0; $size > 1024 && $i < count($units) - 1; $i++) {
+            $size /= 1024;
+        }
+        return round($size, $precision) . ' ' . $units[$i];
+    }
+    
+    return [
+        'size' => formatBytes($logSize),
+        'lines' => $logLines,
+        'exists' => file_exists($logFile)
+    ];
+}
+
+$mihomoStatus = getMihomoStatus();
+$mihomoConfig = getMihomoConfig();
+$logInfo = getMihomoLogInfo();
+
+// 创建仪表板瓦片
+$mytiles[$pluginname]['column1'] =
+<<<EOT
+<tbody id="tblMihomoDash" title="_(Mihomo 代理状态)_">
+<tr>
+    <td>
+        <span class='tile-header'>
+        <span class='tile-header-left'>
+            <i class='icon-network f32'></i>
+            <div class='section'>
+                <span class='mihomo-status'>
+                    <i class='fa fa-circle mihomo-status-icon'></i>
+                    <span class='mihomo-status-text'>_(状态: 加载中...)_</span>
+                </span>
+                <span class='mihomo-version' id='mihomo-version'>_(版本: 加载中...)_</span>
+            </div>
+        </span>
+        <span class='tile-header-right'>
+            <span class='tile-header-right-controls'>
+            <a href="/Settings/EasyMihomo.Main" title="_(前往 Mihomo 设置)_">
+                <i class="fa fa-fw fa-cog control"></i>
+            </a>
+            </span>
+        </span>
+        </span>
+    </td>
+</tr>
+<tr class="header"><td><span class="w25">_(运行状态)_</span><span class="w25">_(配置文件)_</span><span class="w25">_(内存使用)_</span><span class="w25">_(运行时间)_</span></td></tr>
+<tr class="updated">
+    <td><span class="w25"><span class="mihomo-service-status">_(加载中...)_</span></span><span class="w25"><span class="mihomo-config-info">_(加载中...)_</span></span><span class="w25"><span class="mihomo-memory-info">_(加载中...)_</span></span><span class="w25"><span class="mihomo-uptime-info">_(加载中...)_</span></span></td>
+</tr>
+<tr class="updated">
+    <td>
+        <span class="w25"><button class="mihomo-btn mihomo-btn-start" onclick="mihomoAction('start')" title="_(启动 Mihomo 服务)_"><i class="fa fa-play"></i> _(启动)_</button></span><span class="w25"><button class="mihomo-btn mihomo-btn-restart" onclick="mihomoAction('restart')" title="_(重启 Mihomo 服务)_"><i class="fa fa-refresh"></i> _(重启)_</button></span><span class="w25"><button class="mihomo-btn mihomo-btn-stop" onclick="mihomoAction('stop')" title="_(停止 Mihomo 服务)_"><i class="fa fa-stop"></i> _(停止)_</button></span><span class="w25"><button class="mihomo-btn mihomo-btn-ui" onclick="mihomoAction('ui')" title="_(打开 Mihomo 管理界面)_"><i class="fa fa-external-link"></i> _(打开UI)_</button></span>
+    </td>
+</tr>
+<tr><td><span></span></td></tr>
+</tbody>
+EOT;
+
+?>
+<style type="text/css">
+.mihomo-status {
+    display: inline-block;
+    margin-right: 10px;
+}
+
+.mihomo-status-icon {
+    margin-right: 5px;
+}
+
+.mihomo-status-icon.running {
+    color: #28a745;
+}
+
+.mihomo-status-icon.stopped {
+    color: #dc3545;
+}
+
+.mihomo-status-icon.loading {
+    color: #6c757d;
+}
+
+.mihomo-version {
+    display: block;
+    font-size: 12px;
+    color: #6c757d;
+    margin-top: 2px;
+}
+
+.mihomo-service-status {
+    font-weight: bold;
+}
+
+.mihomo-config-info {
+    font-size: 12px;
+    color: #6c757d;
+}
+
+.mihomo-memory-info {
+    font-size: 12px;
+    color: #6c757d;
+    font-weight: bold;
+}
+
+.mihomo-uptime-info {
+    font-size: 12px;
+    color: #6c757d;
+    font-weight: bold;
+}
+
+/* 确保4列等宽对齐 */
+.w25 {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    vertical-align: top;
+    box-sizing: border-box;
+    padding: 0 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+tr.header td, tr.updated td {
+    display: flex;
+}
+
+/* 按钮样式 */
+.mihomo-btn {
+    background: #2c3e50;
+    color: white;
+    border: none;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: bold;
+    transition: all 0.3s ease;
+    width: 100%;
+    white-space: nowrap;
+}
+
+.mihomo-btn:hover {
+    opacity: 0.8;
+    transform: translateY(-1px);
+}
+
+.mihomo-btn:active {
+    transform: translateY(0);
+}
+
+.mihomo-btn i {
+    margin-right: 4px;
+}
+
+.mihomo-btn-start {
+    background: #28a745;
+}
+
+.mihomo-btn-restart {
+    background: #ffc107;
+    color: #212529;
+}
+
+.mihomo-btn-stop {
+    background: #dc3545;
+}
+
+.mihomo-btn-ui {
+    background: #17a2b8;
+}
+
+</style>
+
+<script type="text/javascript" src="/plugins/easy-mihomo/scripts/mihomo-dashboard.js"></script>
+<script type="text/javascript">
+function refreshMihomoDashboard() {
+    $.getJSON('/plugins/easy-mihomo/api.php?cmd=dashboard_status', function(data) {
+        if (data) {
+            // 保存API数据到全局变量，供其他函数使用
+            window.mihomoLastData = data;
+            
+            // 更新状态显示
+            var statusIcon = $('.mihomo-status-icon');
+            var statusText = $('.mihomo-status-text');
+            var versionText = $('#mihomo-version');
+            var serviceStatus = $('.mihomo-service-status');
+            var configInfo = $('.mihomo-config-info');
+            var memoryInfo = $('.mihomo-memory-info');
+            var uptimeInfo = $('.mihomo-uptime-info');
+            
+            // 状态图标和文本
+            statusIcon.removeClass('running stopped loading').addClass(data.running ? 'running' : 'stopped');
+            statusText.text(data.running ? _('运行中') : _('已停止'));
+            
+            // 顶部版本信息
+            versionText.text(_('版本: ') + (data.version || _('未知')));
+            
+            // 运行状态
+            if (data.running) {
+                serviceStatus.html('<span style="color:#28a745;font-weight:bold;">' + _('运行中') + '</span>');
+            } else {
+                serviceStatus.html('<span style="color:#dc3545;font-weight:bold;">' + _('已停止') + '</span>');
+            }
+            
+            // 配置文件信息
+            if (data.config && data.config.has_config) {
+                var configName = data.config.selected_config || _('未知');
+                configInfo.html('<span style="color:#28a745;">' + configName + '</span>');
+            } else {
+                configInfo.html('<span style="color:#dc3545;">' + _('未选择配置') + '</span>');
+            }
+            
+            // 内存使用信息
+            if (data.running && data.memory) {
+                memoryInfo.html('<span style="color:#17a2b8;">' + data.memory + '</span>');
+            } else {
+                memoryInfo.html('<span style="color:#6c757d;">' + _('未知') + '</span>');
+            }
+            
+            // 运行时间信息
+            if (data.running && data.uptime) {
+                uptimeInfo.html('<span style="color:#28a745;">' + data.uptime + '</span>');
+            } else {
+                uptimeInfo.html('<span style="color:#6c757d;">' + _('未知') + '</span>');
+            }
+        }
+    }).fail(function() {
+        // 更新失败时的显示
+        $('.mihomo-status-icon').removeClass('running stopped').addClass('loading');
+        $('.mihomo-status-text').text(_('状态: 错误'));
+        $('.mihomo-service-status').text(_('错误'));
+        $('.mihomo-config-info').text(_('错误'));
+        $('.mihomo-memory-info').text(_('错误'));
+        $('.mihomo-uptime-info').text(_('错误'));
+    });
+}
+
+// 按钮操作函数
+function mihomoAction(action) {
+    switch(action) {
+        case 'start':
+        case 'stop':
+        case 'restart':
+            // 静默处理操作，不跳转页面
+            var actionText = '';
+            switch(action) {
+                case 'start': actionText = _('启动'); break;
+                case 'stop': actionText = _('停止'); break;
+                case 'restart': actionText = _('重启'); break;
+            }
+            
+            // 显示操作状态
+            $('.mihomo-status-text').text(_('状态: ') + actionText + _('中...'));
+            $('.mihomo-status-icon').removeClass('running stopped').addClass('loading');
+            
+            // 发送操作请求
+            $.get('/plugins/easy-mihomo/api.php?cmd=' + action, function(response) {
+                // 操作完成后刷新状态
+                setTimeout(function() {
+                    refreshMihomoDashboard();
+                }, 1000);
+            }).fail(function() {
+                // 操作失败时显示错误
+                $('.mihomo-status-text').text(_('状态: 操作失败'));
+                $('.mihomo-status-icon').removeClass('running stopped loading').addClass('stopped');
+            });
+            break;
+        case 'ui':
+            // 打开控制台UI
+            var currentHostname = window.location.hostname;
+            // 从API数据中获取端口信息
+            var port = null;
+            if (window.mihomoLastData && window.mihomoLastData.config && window.mihomoLastData.config.port) {
+                port = window.mihomoLastData.config.port;
+            }
+            
+            if (!port) {
+                alert('请在配置文件中设置 external-controller 端口');
+                return;
+            }
+            
+            var consoleUrl = 'http://' + currentHostname + ':' + port + '/ui/zashboard/#/proxies';
+            window.open(consoleUrl, '_blank');
+            break;
+    }
+}
+
+// 页面加载时立即刷新一次
+$(document).ready(function() {
+    refreshMihomoDashboard();
+    
+    // 每5秒刷新一次
+    setInterval(refreshMihomoDashboard, 5000);
+});
+</script>
+]]></INLINE>
+</FILE>
+
+<!-- post-install: setup menu entry -->
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+echo "Mihomo plugin installed. Persistent path: /boot/config/plugins/easy-mihomo"
+</INLINE>
+</FILE>
+
+<!-- version cleanup -->
+<FILE Run="/bin/bash">
+<INLINE>
+set -e
+echo "Cleanup completed"
+</INLINE>
+</FILE>
+
+<!-- remove -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE><![CDATA[
+set -e
+echo "正在卸载 Easy-Mihomo 插件..."
+
+# 停止mihomo进程
+echo "  - 正在停止 Mihomo 服务..."
+if pgrep -x mihomo >/dev/null 2>&1; then
+  echo "    检测到mihomo进程，正在停止..."
+  pkill -9 -x mihomo 2>/dev/null || true
+  # 等待进程完全停止
+  sleep 2
+  if pgrep -x mihomo >/dev/null 2>&1; then
+    echo "    强制停止mihomo进程..."
+    pkill -9 -x mihomo 2>/dev/null || true
+    sleep 1
+  fi
+  echo "  ✓ Mihomo 服务已停止"
+else
+  echo "  ✓ Mihomo 服务未运行"
+fi
+
+# 卸载 UI bind 挂载（若存在）
+echo "  - 卸载 UI 挂载..."
+UI_MOUNT_DIR="/boot/config/plugins/easy-mihomo/ui/zashboard"
+if [ -d "$UI_MOUNT_DIR" ] && mountpoint -q "$UI_MOUNT_DIR"; then
+  echo "    检测到bind mount，正在卸载..."
+  umount "$UI_MOUNT_DIR" 2>/dev/null || umount -l "$UI_MOUNT_DIR" 2>/dev/null || true
+  echo "    bind mount已卸载"
+elif [ -L "$UI_MOUNT_DIR" ]; then
+  echo "    检测到软链接，正在删除..."
+  rm -f "$UI_MOUNT_DIR" 2>/dev/null || true
+  echo "    软链接已删除"
+else
+  echo "    无需处理UI挂载"
+fi
+echo "  ✓ UI 挂载处理完成"
+
+# 清理PID文件
+echo "  - 清理进程文件..."
+rm -f /var/run/mihomo.pid
+echo "  ✓ 进程文件已清理"
+
+# 清理二进制文件
+echo "  - 清理二进制文件..."
+rm -f /usr/local/bin/mihomo
+rm -f /boot/config/plugins/easy-mihomo/mihomo
+echo "  ✓ 二进制文件已清理"
+
+# 清理插件目录
+echo "  - 清理插件目录..."
+rm -rf /usr/local/emhttp/plugins/easy-mihomo
+rm -f /boot/config/plugins/easy-mihomo/.version
+rm -rf /boot/config/plugins/easy-mihomo
+echo "  ✓ 插件目录已清理"
+
+# 清理内存临时目录
+echo "  - 清理内存临时目录..."
+rm -rf /var/tmp/easy-mihomo-ui /var/tmp/easy-mihomo-progress /tmp/easy-mihomo-ui /tmp/mihomo-download
+echo "  ✓ 内存临时目录已清理"
+
+# 清理系统覆盖层文件（仅限本插件命名空间）
+echo "  - 清理系统文件..."
+rm -rf /var/local/overlay/usr/local/emhttp/plugins/easy-mihomo
+rm -f /var/local/overlay/usr/local/emhttp/plugins/easy-mihomo.*
+echo "  ✓ 系统文件已清理"
+
+# 清理日志文件
+echo "  - 清理日志文件..."
+rm -f /var/log/mihomo.log
+echo "  ✓ 日志文件已清理"
+
+# 清理临时文件
+echo "  - 清理临时文件..."
+rm -f /tmp/mihomo
+echo "  ✓ 临时文件已清理"
+
+# 清理开机即启动注入与标志
+echo "  - 清理开机启动配置..."
+sed -i "/^# BEGIN easy-mihomo (do not edit)$/,/^# END easy-mihomo$/d" /boot/config/go 2>/dev/null || true
+rm -f /boot/config/plugins/easy-mihomo/bootstart.enabled
+echo "  ✓ 开机启动配置已清理"
+
+# 清理定时任务
+echo "  - 清理定时清理任务..."
+crontab -l 2>/dev/null | grep -v "mihomo.*log_cleanup" | crontab - 2>/dev/null || true
+echo "  ✓ 定时清理任务已清理"
+
+echo ""
+echo "🎉 Easy-Mihomo 插件卸载完成！"
+echo "   所有相关文件和配置已完全清理。"
+]]></INLINE>
+</FILE>
+
+</PLUGIN>
