@@ -131,7 +131,11 @@ esac
 if [ "$FILE_SIZE" -gt "$MAX_BYTES" ]; then
     echo "[$(date)] 日志文件过大 (${FILE_SIZE} bytes)，开始清理..." >> "$LOG_FILE"
     # 保留最后KEEP_LINES行
-    tail -n "$KEEP_LINES" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+    TMP_FILE=$(mktemp /tmp/mihomo-log-cleanup.XXXXXX) || exit 0
+    trap 'rm -f "$TMP_FILE"' EXIT
+    tail -n "$KEEP_LINES" "$LOG_FILE" > "$TMP_FILE" || exit 0
+    : > "$LOG_FILE"
+    cat "$TMP_FILE" >> "$LOG_FILE"
     echo "[$(date)] 日志清理完成，保留最近 $KEEP_LINES 行" >> "$LOG_FILE"
 fi
 LOGCLEANEOF
